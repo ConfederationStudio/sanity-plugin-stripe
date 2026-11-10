@@ -250,7 +250,7 @@ The field saves this on your document:
 }
 ```
 
-Prices are in currency units, as editors type them (29.5 is €29.50), and are converted to Stripe's minor units at checkout, zero-decimal currencies included.
+Prices are in currency units, as editors type them (29.5 is €29.50), and are converted to Stripe's minor units at checkout. Stripe's sandbox has accepted the plugin's amounts in euros and in zero-decimal currencies (yen, won); three-decimal currencies such as the Kuwaiti dinar follow Stripe's rule but have not been tried.
 
 Stock is a document of its own per product, written by the stock boxes and the webhook:
 
