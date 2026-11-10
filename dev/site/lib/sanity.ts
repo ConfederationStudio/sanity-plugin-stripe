@@ -12,8 +12,8 @@ import {standInReader, standInWriter} from './stand-in'
 export const standIn = !projectId
 
 /**
- * Reads straight from the API, not the CDN, so the checkout sees today's prices and stock. The
- * dataset is public, and products and the shop settings need no token.
+ * Reads straight from the API, not the CDN, so the checkout sees today's prices. It has no token,
+ * so it sees what anyone sees: published products and the shop settings, no drafts, no stock.
  */
 const client = standIn
   ? null
@@ -27,11 +27,14 @@ const client = standIn
 
 const token = process.env.SANITY_API_WRITE_TOKEN
 
-/** Reads products and the shop settings. */
+/** Reads products and the shop settings, as the public can. */
 export const reader: SanityReader = client ?? standInReader
 
-/** Lowers stock counts when an order is paid, or null without a token. */
-export const writer: SanityWriter | null = client
+/**
+ * Reads and lowers stock counts, which need a token, or null without one: then nothing is
+ * counted. It is used for stock alone, and only on the server.
+ */
+export const stockClient: SanityWriter | null = client
   ? token
     ? client.withConfig({token})
     : null

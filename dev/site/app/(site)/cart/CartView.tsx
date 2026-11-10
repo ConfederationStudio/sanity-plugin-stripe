@@ -75,7 +75,8 @@ export function CartView({
                 {status.available && problem && (
                   <span className="muted">
                     {REASONS[problem.reason]}
-                    {problem.reason === 'tooMany' && `: ${problem.maxQuantity} available`}
+                    {typeof problem.maxQuantity === 'number' &&
+                      `: ${problem.maxQuantity} available`}
                   </span>
                 )}
               </span>
