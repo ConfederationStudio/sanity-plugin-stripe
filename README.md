@@ -2,7 +2,7 @@
 
 Sell from a Sanity site with Stripe Checkout, without a shop platform in between. Editors set price, stock and variants on their own documents in the Studio; the site keeps a cart in the browser and sends buyers to Stripe's payment page; a webhook lowers stock and hands the paid order to your code. Made by Eurico Sá Fernandes at [Confederation Studio](https://github.com/ConfederationStudio). It isn't affiliated with or endorsed by Stripe or Sanity.
 
-> **Status:** not released yet. The test site has taken payments in a Stripe sandbox against a real, public Sanity dataset, from the cart to Stripe's page and back through the webhook: stock went down once, also when the same event was delivered twice at the same moment; a resent event changed nothing; a declined card fulfilled nothing; a payment made outside the shop was left alone; and a query without a token could read no stock, no draft and nothing about an order. Still to be tried: the Studio's stock boxes in a browser, a delayed payment method, and a key that may not write. Treat everything below as a draft until 0.1.0. It targets Sanity Studio 6, React 19.2 and stripe-node 23.
+> **Status:** 0.1, tried in a Stripe sandbox against a real, public Sanity dataset, from the cart to Stripe's page and back through the webhook, and in the Studio: stock went down once, also when the same event was delivered twice at the same moment; a resent event changed nothing; a declined card fulfilled nothing; a payment made outside the shop was left alone; a query without a token could read no stock, no draft and nothing about an order; and the Studio's stock boxes followed a count lowered from outside the Studio, as an order lowers it. Not tried yet: a delayed payment method (a bank debit, for one), a Sanity token that may only read, and three-decimal currencies. Until 1.0, a minor version may change the API; the [changelog](https://github.com/ConfederationStudio/sanity-plugin-stripe/blob/main/CHANGELOG.md) says how. It targets Sanity Studio 6, React 19.2 and stripe-node 23.
 
 - **In the Studio.** A `stripeCommerce` field for any document type: on sale or sold out, price, tax class, variants that each sell out on their own, and optional stock counts. A Shop settings document holds the shipping regions with one flat rate each, and whether stock sells out by itself at 0.
 - **In the browser.** A cart in localStorage that holds product references and quantities, never prices, with hooks for the buy button and the checkout. The markup is yours.
@@ -145,7 +145,7 @@ Without `stockClient` nothing is counted: the shop sells by the on-sale switch a
 
 ### 3. Stripe
 
-Use a [sandbox](https://docs.stripe.com/sandboxes) while building, and a restricted key (`rk_…`) rather than a secret key. The key needs Checkout Sessions: Write. Reading back which products were bought may also need Products: Read; the smallest set that works is still to be confirmed before 0.1.0.
+Use a [sandbox](https://docs.stripe.com/sandboxes) while building, and a restricted key (`rk_…`) rather than a secret key. The key needs Checkout Sessions: Write. Reading back which products were bought may also need Products: Read. The smallest set that works has not been confirmed yet, so look at the webhook's log after your first test payment: a missing permission shows there, in Stripe's own words.
 
 Locally, forward events to the site and copy the `whsec_…` secret it prints into `STRIPE_WEBHOOK_SECRET`:
 
