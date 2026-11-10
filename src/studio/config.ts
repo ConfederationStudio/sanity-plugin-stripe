@@ -1,0 +1,77 @@
+import {priceDecimals} from '../core/money'
+
+/** A tax class an editor can give a product, such as a reduced and a standard VAT rate. */
+export interface TaxClass {
+  /** What the editor reads, such as "Printed matter (9%)". */
+  title: string
+  /** What is saved, and what the site maps to a Stripe tax rate, such as `reduced`. */
+  value: string
+}
+
+/** A shipping region to start the shop settings with. */
+export interface ShippingRegionInput {
+  title: string
+  /** ISO 3166-1 alpha-2 codes, such as `['NL']` or `[...EU_COUNTRIES]`. */
+  countries?: readonly string[]
+  /** Covers every country Stripe ships to that no other region lists. */
+  everywhereElse?: boolean
+  /** One flat rate per order, in currency units. */
+  rate: number
+}
+
+export interface StripeCommerceConfig {
+  /** ISO 4217 code of the currency every price is in, such as `eur` or `usd`. */
+  currency: string
+  tax?: {
+    /** What tax is called where the shop is: `VAT`, `GST`, `sales tax`. Default `tax`. */
+    label?: string
+    /** Whether the prices editors enter include tax. It only changes the labels. Default true. */
+    included?: boolean
+    /** Tax classes editors choose from. Without any, products have no tax class field. */
+    classes?: readonly TaxClass[]
+  }
+  /** Starting values for the shop settings document, used when it is first created. */
+  shop?: {
+    orderEmail?: string
+    shippingRegions?: readonly ShippingRegionInput[]
+  }
+}
+
+export interface ResolvedConfig {
+  /** Lower case. */
+  currency: string
+  /** Upper case, for labels. */
+  currencyLabel: string
+  priceDecimals: 0 | 2
+  tax: {label: string; included: boolean; classes: readonly TaxClass[]}
+  shop: {orderEmail?: string; shippingRegions: readonly ShippingRegionInput[]}
+}
+
+export function resolveConfig(config: StripeCommerceConfig): ResolvedConfig {
+  const currency = typeof config?.currency === 'string' ? config.currency.trim().toLowerCase() : ''
+  if (!/^[a-z]{3}$/.test(currency))
+    throw new TypeError(
+      `sanity-plugin-stripe: currency must be a three-letter code, such as stripeCommerce({currency: 'eur'})`,
+    )
+  return {
+    currency,
+    currencyLabel: currency.toUpperCase(),
+    priceDecimals: priceDecimals(currency),
+    tax: {
+      label: config.tax?.label?.trim() || 'tax',
+      included: config.tax?.included ?? true,
+      classes: config.tax?.classes ?? [],
+    },
+    shop: {
+      orderEmail: config.shop?.orderEmail,
+      shippingRegions: config.shop?.shippingRegions ?? [],
+    },
+  }
+}
+
+/** "Price (EUR, including VAT)", or "Price (EUR)" when prices are entered without tax. */
+export function moneyTitle(name: string, config: ResolvedConfig): string {
+  return config.tax.included
+    ? `${name} (${config.currencyLabel}, including ${config.tax.label})`
+    : `${name} (${config.currencyLabel})`
+}
