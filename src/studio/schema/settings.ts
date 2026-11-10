@@ -6,6 +6,7 @@ import {asArray, isObject} from '../../core/guards'
 import {SHIPPING_REGION_TYPE, SHOP_SETTINGS_TYPE} from '../../core/ids'
 import {formatPrice} from '../../core/money'
 import {moneyTitle, type ResolvedConfig} from '../config'
+import {createRegionsInput} from '../RegionsInput'
 
 /** A shipping region as the Studio saves it. */
 export interface ShippingRegionValue {
@@ -19,17 +20,19 @@ export interface ShippingRegionValue {
   rate: number
 }
 
-/** The shop settings document as the Studio saves it. */
+/**
+ * The shop settings document as the Studio saves it. Anyone can read it from a public dataset,
+ * so it holds only what the cart shows: no email address, no key.
+ */
 export interface ShopSettingsValue {
   shippingRegions?: ShippingRegionValue[]
-  orderEmail?: string
   autoSoldOut?: boolean
 }
 
 // A region as validation and `hidden` get it: unknown, and maybe half filled in.
 const coversEverywhereElse = (region: unknown) => isObject(region) && region.everywhereElse === true
 
-/** The regions from the plugin's options, as the first shop settings document starts with them. */
+/** The regions from the plugin's options, as the shop settings start with them. */
 export function initialRegions(config: ResolvedConfig): ShippingRegionValue[] {
   return config.shop.shippingRegions.map((region, index) => ({
     _key: `region-${index + 1}`,
@@ -125,6 +128,7 @@ export function createShopSettingsType(config: ResolvedConfig) {
         description:
           'Buyers choose one in the cart. Its rate is added at checkout, and Stripe only accepts addresses in its countries.',
         of: [defineArrayMember({type: SHIPPING_REGION_TYPE})],
+        components: {input: createRegionsInput(regions)},
         ...(regions.length ? {initialValue: regions} : {}),
         validation: (rule) =>
           rule
@@ -148,18 +152,10 @@ export function createShopSettingsType(config: ResolvedConfig) {
             }),
       }),
       defineField({
-        name: 'orderEmail',
-        title: 'Order email',
-        type: 'string',
-        description: 'Where new orders are sent.',
-        ...(config.shop.orderEmail ? {initialValue: config.shop.orderEmail} : {}),
-        validation: (rule) => rule.required().email(),
-      }),
-      defineField({
         name: 'autoSoldOut',
         title: 'Sell out automatically',
         type: 'boolean',
-        description: 'When a product or variant with a stock count reaches 0, mark it sold out.',
+        description: 'When the stock count of a product or variant reaches 0, mark it sold out.',
         initialValue: true,
       }),
     ],

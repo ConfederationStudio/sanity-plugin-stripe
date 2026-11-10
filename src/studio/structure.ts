@@ -12,8 +12,9 @@ import {SHOP_SETTINGS_ID, SHOP_SETTINGS_TYPE} from '../core/ids'
  */
 export function shopSettingsListItem(
   S: StructureBuilder,
-  title = 'Shop settings',
+  options: {title?: string} = {},
 ): ListItemBuilder {
+  const title = options.title ?? 'Shop settings'
   return S.listItem()
     .title(title)
     .id(SHOP_SETTINGS_ID)

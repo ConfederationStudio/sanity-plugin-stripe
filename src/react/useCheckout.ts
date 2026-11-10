@@ -1,4 +1,4 @@
-import {useCallback, useState} from 'react'
+import {useCallback, useEffect, useState} from 'react'
 
 import {readCheckoutProblems, type CheckoutProblem} from '../core/cart'
 import {asString, isObject} from '../core/guards'
@@ -53,6 +53,15 @@ export function useCheckout(options: UseCheckoutOptions = {}): Checkout {
   const messages = {...MESSAGES, ...options.messages}
   const {lines} = useCart()
   const [state, setState] = useState<CheckoutState>({status: 'idle'})
+
+  // Back from Stripe's page, a browser can restore this one exactly as it was left: still loading.
+  useEffect(() => {
+    const restore = (event: PageTransitionEvent) => {
+      if (event.persisted) setState({status: 'idle'})
+    }
+    window.addEventListener('pageshow', restore)
+    return () => window.removeEventListener('pageshow', restore)
+  }, [])
 
   const start = async (regionId: string | undefined) => {
     if (!regionId) {

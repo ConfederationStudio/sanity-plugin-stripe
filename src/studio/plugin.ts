@@ -8,10 +8,25 @@ import {createShippingRegionType, createShopSettingsType} from './schema/setting
 /** What an editor can do with the one shop settings document: not duplicate or delete it. */
 const SETTINGS_ACTIONS = new Set(['publish', 'discardChanges', 'restore'])
 
+/** There is one shop settings document, made by opening it in the structure: no "new" for it. */
+export function withoutSettingsTemplate<T extends {templateId: string}>(options: T[]): T[] {
+  return options.filter((option) => option.templateId !== SHOP_SETTINGS_TYPE)
+}
+
+/** The shop settings keep publish, discard and restore; every other document keeps everything. */
+export function settingsActions<T extends {action?: string}>(
+  actions: T[],
+  schemaType: string,
+): T[] {
+  return schemaType === SHOP_SETTINGS_TYPE
+    ? actions.filter(({action}) => action !== undefined && SETTINGS_ACTIONS.has(action))
+    : actions
+}
+
 /**
  * Selling with Stripe Checkout from the Studio: the `stripeCommerce` field (price, tax class,
- * availability, stock and variants) and the shop settings document (shipping regions, the order
- * email, selling out at 0).
+ * on sale or sold out, variants, and stock counts kept out of the public dataset) and the shop
+ * settings document (shipping regions, selling out at 0).
  *
  * ```ts
  * plugins: [structureTool({structure}), stripeCommerce({currency: 'eur'})]
@@ -33,13 +48,8 @@ export const stripeCommerce = definePlugin<StripeCommerceConfig>((options) => {
       ],
     },
     document: {
-      // There is one shop settings document, made by opening it in the structure.
-      newDocumentOptions: (previous) =>
-        previous.filter((option) => option.templateId !== SHOP_SETTINGS_TYPE),
-      actions: (previous, context) =>
-        context.schemaType === SHOP_SETTINGS_TYPE
-          ? previous.filter(({action}) => action && SETTINGS_ACTIONS.has(action))
-          : previous,
+      newDocumentOptions: (previous) => withoutSettingsTemplate(previous),
+      actions: (previous, context) => settingsActions(previous, context.schemaType),
     },
   }
 })

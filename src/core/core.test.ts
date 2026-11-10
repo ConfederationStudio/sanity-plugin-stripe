@@ -9,21 +9,23 @@ import {
   type CartProduct,
 } from './cart'
 import {EU_COUNTRIES, STRIPE_SHIPPING_COUNTRIES} from './countries'
-import {stockRecordId} from './ids'
+import {publishedId, SHOP_SETTINGS_ID, stockChangeId, stockId} from './ids'
 import {formatMoney, priceDecimals, toMinorUnits} from './money'
 import {
   cartProductProjection,
   cartProductsQuery,
   checkoutProductsQuery,
+  COMMERCE_PROJECTION,
+  productVersionsQuery,
   SHOP_SETTINGS_QUERY,
-  stockQuery,
 } from './queries'
 import {readShopSettings, regionOptions, regionsFromSettings, resolveRegions} from './regions'
+import {readStockDocuments, STOCK_QUERY, stockLeft} from './stock'
 
 const magazine: CartProduct = {
   _id: 'magazine',
   title: 'Issue 16',
-  commerce: {availability: 'onSale', price: 25, stockCount: 3},
+  commerce: {availability: 'onSale', price: 25},
 }
 const shirt: CartProduct = {
   _id: 'shirt',
@@ -32,9 +34,8 @@ const shirt: CartProduct = {
     availability: 'onSale',
     price: 29.5,
     variants: [
-      {_key: 'm', label: 'M', stockCount: 2},
+      {_key: 'm', label: 'M'},
       {_key: 'l', label: 'L', availability: 'soldOut'},
-      {_key: 'xl', label: 'XL'},
     ],
   },
 }
@@ -74,29 +75,36 @@ describe('sanitizeLines', () => {
       {productId: 'a', quantity: 1},
     ])
   })
+
+  it('takes published products only: no draft, no copy in a release, nothing private', () => {
+    expect(
+      sanitizeLines([
+        {productId: 'drafts.magazine', quantity: 1},
+        {productId: 'versions.rSummer.magazine', quantity: 1},
+        {productId: 'stripe.stock.magazine', quantity: 1},
+        {productId: 'magazine', quantity: 1},
+      ]),
+    ).toEqual([{productId: 'magazine', quantity: 1}])
+  })
 })
 
 describe('lineStatus', () => {
-  it('caps the quantity at the stock count', () => {
+  it('goes by the on-sale switch, up to the most one order can hold', () => {
     expect(lineStatus(magazine)).toEqual({
       available: true,
-      maxQuantity: 3,
+      maxQuantity: 10,
       price: 25,
       variant: undefined,
     })
-  })
-
-  it('counts a stock of 0 as sold out, whatever the switch says', () => {
-    const empty = {...magazine, commerce: {...magazine.commerce, stockCount: 0}}
-    expect(lineStatus(empty)).toEqual({available: false, reason: 'soldOut'})
+    const gone = {...magazine, commerce: {...magazine.commerce, availability: 'soldOut' as const}}
+    expect(lineStatus(gone)).toEqual({available: false, reason: 'soldOut'})
   })
 
   it('asks for a variant when the product has them', () => {
     expect(lineStatus(shirt)).toEqual({available: false, reason: 'chooseVariant'})
     expect(lineStatus(shirt, 'l')).toEqual({available: false, reason: 'soldOut'})
     expect(lineStatus(shirt, 'xs')).toEqual({available: false, reason: 'variantMissing'})
-    expect(lineStatus(shirt, 'm')).toMatchObject({available: true, maxQuantity: 2, price: 29.5})
-    expect(lineStatus(shirt, 'xl')).toMatchObject({available: true, maxQuantity: 10})
+    expect(lineStatus(shirt, 'm')).toMatchObject({available: true, maxQuantity: 10, price: 29.5})
   })
 
   it('turns down what is missing, unpriced or not a variant', () => {
@@ -110,10 +118,10 @@ describe('lineStatus', () => {
 })
 
 describe('cartRows', () => {
-  it('names, caps and totals each line', () => {
+  it('names and totals each line', () => {
     const rows = cartRows(
       [
-        {productId: 'magazine', quantity: 5},
+        {productId: 'magazine', quantity: 3},
         {productId: 'shirt', variantKey: 'm', quantity: 1},
         {productId: 'gone', quantity: 1},
       ],
@@ -163,12 +171,12 @@ describe('regions', () => {
       {_key: 'draft', title: 'Half filled in'},
       'not a region',
     ],
-    orderEmail: 'orders@example.com',
+    autoSoldOut: false,
   })
 
   it('reads the settings and leaves out regions that aren’t filled in', () => {
     expect(readShopSettings(null)).toBeNull()
-    expect(settings?.orderEmail).toBe('orders@example.com')
+    expect(settings?.autoSoldOut).toBe(false)
     expect(regionsFromSettings(settings).map((region) => region.id)).toEqual(['nl', 'eu', 'world'])
   })
 
@@ -209,18 +217,79 @@ describe('queries', () => {
       image: 'cover.asset->url',
     }
     expect(checkoutProductsQuery(options)).toBe(
-      `*[_type in ["book", "print"] && _id in $ids]{_id, "title": name, "slug": slug.current, "imageUrl": cover.asset->url, "commerce": shop{availability, price, taxClass, stockCount, variants[]{_key, label, availability, stockCount}}}`,
+      `*[_type in ["book", "print"] && _id in $ids]{_id, "title": name, "slug": slug.current, "imageUrl": cover.asset->url, "commerce": shop{availability, price, taxClass, variants[]{_key, label, availability}}}`,
     )
-    expect(stockQuery(options)).toContain('"commerce": shop{stockCount')
+  })
+
+  it('asks for every version of the products it marks sold out', () => {
+    expect(productVersionsQuery(['magazine', 'shirt'], {field: 'shop'})).toEqual({
+      query: `*[_type in ["product"] && defined(shop) && (sanity::versionOf($product0) || sanity::versionOf($product1))]{_id, "variants": shop.variants[]._key}`,
+      params: {product0: 'magazine', product1: 'shirt'},
+    })
   })
 
   it('refuses names that would change the query', () => {
     expect(() => cartProductsQuery({types: ['product"] || true || _type in ["x']})).toThrow()
-    expect(() => stockQuery({field: 'commerce.price'})).toThrow()
+    expect(() => checkoutProductsQuery({field: 'commerce.price'})).toThrow()
   })
 
-  it('reads the one shop settings document', () => {
-    expect(SHOP_SETTINGS_QUERY).toContain('_type == "stripeShopSettings" && _id == "shopSettings"')
+  it('never asks the public documents for a stock count or an email address', () => {
+    const publicQueries = [
+      COMMERCE_PROJECTION,
+      cartProductProjection(),
+      cartProductsQuery(),
+      checkoutProductsQuery(),
+      SHOP_SETTINGS_QUERY,
+    ]
+    for (const query of publicQueries) {
+      expect(query).not.toMatch(/stockCount/i)
+      expect(query).not.toMatch(/email/i)
+    }
+  })
+})
+
+describe('ids', () => {
+  it('keeps the shop settings readable without a token', () => {
+    expect(SHOP_SETTINGS_ID).toBe('stripeShopSettings')
+    expect(SHOP_SETTINGS_ID).not.toContain('.')
+    expect(SHOP_SETTINGS_QUERY).toContain(
+      '_type == "stripeShopSettings" && _id == "stripeShopSettings"',
+    )
+  })
+
+  it('keeps stock and its records out of reach without a token', () => {
+    expect(stockId('magazine')).toBe('stripe.stock.magazine')
+    expect(stockChangeId('cs_test_a1B2')).toBe('stripe.stockChange.cs_test_a1B2')
+    expect(stockChangeId('cs/../x')).toBe('stripe.stockChange.cs----x')
+  })
+
+  it('finds the product a form is editing, whichever version it has open', () => {
+    expect(publishedId('magazine')).toBe('magazine')
+    expect(publishedId('drafts.magazine')).toBe('magazine')
+    expect(publishedId('versions.rSummer.magazine')).toBe('magazine')
+  })
+})
+
+describe('stock', () => {
+  const stock = readStockDocuments([
+    {_id: 'stripe.stock.magazine', stockCount: 3},
+    {_id: 'stripe.stock.shirt', variants: [{_key: 'm', stockCount: 1}, {_key: 'l'}, 'junk']},
+    {_id: 'magazine', stockCount: 99},
+    null,
+  ])
+
+  it('reads stock documents by product, and nothing else', () => {
+    expect([...stock.keys()]).toEqual(['magazine', 'shirt'])
+    expect(STOCK_QUERY).toContain('_type == "stripe.stock" && _id in $ids')
+  })
+
+  it('says how many are left, or null when it isn’t counted', () => {
+    expect(stockLeft(stock.get('magazine'))).toBe(3)
+    expect(stockLeft(stock.get('shirt'), 'm')).toBe(1)
+    expect(stockLeft(stock.get('shirt'), 'l')).toBeNull()
+    expect(stockLeft(stock.get('shirt'))).toBeNull()
+    expect(stockLeft(stock.get('poster'))).toBeNull()
+    expect(stockLeft(undefined, 'm')).toBeNull()
   })
 })
 
@@ -228,10 +297,5 @@ describe('readers', () => {
   it('drops what isn’t a product document', () => {
     expect(readCartProducts([magazine, null, {title: 'No id'}])).toEqual([magazine])
     expect(readCartProducts(undefined)).toEqual([])
-  })
-
-  it('keeps stock records out of reach without a token', () => {
-    expect(stockRecordId('cs_test_a1B2')).toBe('stripe.stock.cs_test_a1B2')
-    expect(stockRecordId('cs/../x')).toBe('stripe.stock.cs----x')
   })
 })

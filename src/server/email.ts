@@ -35,6 +35,8 @@ export interface OrderEmailOptions {
   locale?: string
   /** What the order did to stock counts. Anything sold below 0 is called out. */
   stock?: readonly StockChange[]
+  /** Why stock could not be lowered, from the webhook's context. The email says to check it. */
+  stockError?: string
 }
 
 export interface OrderEmail {
@@ -45,7 +47,7 @@ export interface OrderEmail {
 
 /** A plain order email for the shop: what to pack, where to send it and who paid. */
 export function orderEmail(order: Order, options: OrderEmailOptions): OrderEmail {
-  const {shopName, locale = 'en', stock = []} = options
+  const {shopName, locale = 'en', stock = [], stockError} = options
   const money = (minor: number) => formatMoney(minor, order.currency, locale)
   const count = order.items.reduce((sum, item) => sum + item.quantity, 0)
   const who = order.shipping.name ?? order.customer.name ?? order.customer.email ?? 'a customer'
@@ -58,29 +60,29 @@ export function orderEmail(order: Order, options: OrderEmailOptions): OrderEmail
   const link = dashboardUrl(order)
   const date = order.createdAt.toISOString().slice(0, 10)
 
-  // The same product can be oversold in its published document and in its draft: say it once.
-  const oversold = [
-    ...new Set(
-      stock
-        .filter((change) => change.to < 0)
-        .map((change) => {
-          const item = order.items.find(
-            (candidate) =>
-              candidate.productId === change.productId &&
-              (candidate.variantKey ?? '') === (change.variantKey ?? ''),
-          )
-          return item?.name ?? change.productId
-        }),
-    ),
+  const oversold = stock
+    .filter((change) => change.to < 0)
+    .map((change) => {
+      const item = order.items.find(
+        (candidate) =>
+          candidate.productId === change.productId &&
+          (candidate.variantKey ?? '') === (change.variantKey ?? ''),
+      )
+      return item?.name ?? change.productId
+    })
+  const warnings = [
+    ...(oversold.length
+      ? [`Check your stock: more was sold than was counted in stock for ${oversold.join(', ')}.`]
+      : []),
+    ...(stockError
+      ? [`Stock counts were not lowered for this order. Change them by hand. (${stockError})`]
+      : []),
   ]
-  const warning = oversold.length
-    ? `Check your stock: more was sold than was counted in stock for ${oversold.join(', ')}.`
-    : null
 
   const text = [
     `New order on ${date}${order.livemode ? '' : ' (test mode, no money moved)'}`,
     '',
-    ...(warning ? [warning, ''] : []),
+    ...warnings.flatMap((warning) => [warning, '']),
     ...order.items.map((item) => `${item.quantity} × ${item.name}  ${money(item.amountTotal)}`),
     `${shippingLabel}  ${money(order.amountShipping)}`,
     `Total  ${money(order.amountTotal)}`,
@@ -102,7 +104,7 @@ export function orderEmail(order: Order, options: OrderEmailOptions): OrderEmail
     .join('')
   const html = `<div style="font-family:Helvetica,Arial,sans-serif;font-size:15px;line-height:1.45;color:#191919">
 <p>New order on ${date}${order.livemode ? '' : ' <strong>(test mode, no money moved)</strong>'}</p>
-${warning ? `<p><strong>${escapeHtml(warning)}</strong></p>\n` : ''}<table style="border-collapse:collapse">${rows}
+${warnings.map((warning) => `<p><strong>${escapeHtml(warning)}</strong></p>\n`).join('')}<table style="border-collapse:collapse">${rows}
 <tr><td></td><td style="padding:4px 12px 4px 0">${escapeHtml(shippingLabel)}</td><td style="padding:4px 0;text-align:right">${money(order.amountShipping)}</td></tr>
 <tr><td></td><td style="padding:4px 12px 4px 0"><strong>Total</strong></td><td style="padding:4px 0;text-align:right"><strong>${money(order.amountTotal)}</strong></td></tr>
 </table>

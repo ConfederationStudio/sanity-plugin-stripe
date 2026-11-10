@@ -39,8 +39,8 @@ export function resolveProductQuery(options: ProductQueryOptions = {}) {
 const typeFilter = (types: readonly string[]) =>
   `_type in [${types.map((type) => JSON.stringify(type)).join(', ')}]`
 
-/** The price-and-stock field as the cart and the checkout read it. */
-export const COMMERCE_PROJECTION = `{availability, price, taxClass, stockCount, variants[]{_key, label, availability, stockCount}}`
+/** The price-and-availability field as the cart and the checkout read it. No stock counts. */
+export const COMMERCE_PROJECTION = `{availability, price, taxClass, variants[]{_key, label, availability}}`
 
 /**
  * What the cart and the checkout need of a product, for the site's own queries:
@@ -66,11 +66,26 @@ export function checkoutProductsQuery(options?: ProductQueryOptions): string {
   return `*[${typeFilter(types)} && _id in $ids]{${cartProductProjection(options)}}`
 }
 
-/** Stock counts of the documents with the ids in `$ids`, drafts included, for the webhook. */
-export function stockQuery(options?: ProductQueryOptions): string {
+/**
+ * Every version of the products in `productIds` (published, draft, and copies inside a Content
+ * Release), with the keys of its variants: what the webhook marks sold out. It needs the raw
+ * perspective, a token, and API version 2025-02-19 or later.
+ */
+export function productVersionsQuery(
+  productIds: readonly string[],
+  options?: ProductQueryOptions,
+): {query: string; params: Record<string, string>} {
   const {types, field} = resolveProductQuery(options)
-  return `*[${typeFilter(types)} && _id in $ids]{_id, "commerce": ${field}{stockCount, variants[]{_key, stockCount}}}`
+  const params: Record<string, string> = {}
+  const anyVersion = productIds.map((id, index) => {
+    params[`product${index}`] = id
+    return `sanity::versionOf($product${index})`
+  })
+  return {
+    query: `*[${typeFilter(types)} && defined(${field}) && (${anyVersion.join(' || ') || 'false'})]{_id, "variants": ${field}.variants[]._key}`,
+    params,
+  }
 }
 
-/** The shop settings: shipping regions, the order email and whether stock sells out by itself. */
-export const SHOP_SETTINGS_QUERY = `*[_type == "${SHOP_SETTINGS_TYPE}" && _id == "${SHOP_SETTINGS_ID}"][0]{shippingRegions[]{_key, title, everywhereElse, countries, rate}, orderEmail, autoSoldOut}`
+/** The shop settings: shipping regions and whether stock sells out by itself. */
+export const SHOP_SETTINGS_QUERY = `*[_type == "${SHOP_SETTINGS_TYPE}" && _id == "${SHOP_SETTINGS_ID}"][0]{shippingRegions[]{_key, title, everywhereElse, countries, rate}, autoSoldOut}`

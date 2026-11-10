@@ -11,10 +11,15 @@ export interface StripeCall {
   headers: Headers
 }
 
-/** A paid Checkout Session, as Stripe's API returns it. */
+/** What the test shop marks its Checkout Sessions with. */
+export const SHOP_TAG = 'shop_abcdefgh'
+
+/** A paid Checkout Session of the test shop, as Stripe's API returns it. */
 export const PAID_SESSION = {
   id: 'cs_test_1',
   object: 'checkout.session',
+  mode: 'payment',
+  integration_identifier: SHOP_TAG,
   payment_status: 'paid',
   payment_intent: 'pi_1',
   livemode: false,
@@ -58,7 +63,7 @@ const lineItem = (
   },
 })
 
-/** One magazine and one shirt in M: the products of `fakeDataset`. */
+/** One magazine and one shirt in M: products of the fake dataset. */
 export const LINE_ITEMS = [
   lineItem('li_1', 'Issue 16', 1, 2500, {productId: 'magazine'}),
   lineItem('li_2', 'Shirt – M', 1, 2950, {productId: 'shirt', variantKey: 'm'}),
@@ -76,9 +81,9 @@ export interface FakeStripeOptions {
  */
 export function fakeStripe(options: FakeStripeOptions = {}) {
   const calls: StripeCall[] = []
-  /** The PaymentIntent's metadata, where finished fulfilment steps are recorded. */
-  const intentMetadata: Record<string, string> = {}
-  const session = {...PAID_SESSION, ...options.session}
+  /** The session's metadata, where finished fulfilment steps are recorded. */
+  const metadata: Record<string, string> = {...PAID_SESSION.metadata}
+  const session = {...PAID_SESSION, ...options.session, metadata}
 
   const reply = (data: unknown, status = 200) =>
     new Response(JSON.stringify(data), {
@@ -104,8 +109,14 @@ export function fakeStripe(options: FakeStripeOptions = {}) {
         object: 'checkout.session',
         url: `https://checkout.stripe.com/c/pay/${session.id}`,
       })
-    if (method === 'GET' && url.pathname === `/v1/checkout/sessions/${session.id}`)
+    if (url.pathname === `/v1/checkout/sessions/${session.id}`) {
+      // An update: Stripe merges the metadata it is sent into what the session has.
+      for (const [key, value] of body) {
+        const field = /^metadata\[(.+)\]$/.exec(key)?.[1]
+        if (field) metadata[field] = value
+      }
       return reply(session)
+    }
     if (method === 'GET' && url.pathname === `/v1/checkout/sessions/${session.id}/line_items`)
       return reply({
         object: 'list',
@@ -113,13 +124,6 @@ export function fakeStripe(options: FakeStripeOptions = {}) {
         has_more: false,
         url: url.pathname,
       })
-    if (url.pathname === '/v1/payment_intents/pi_1') {
-      for (const [key, value] of body) {
-        const field = /^metadata\[(.+)\]$/.exec(key)?.[1]
-        if (field) intentMetadata[field] = value
-      }
-      return reply({id: 'pi_1', object: 'payment_intent', metadata: intentMetadata})
-    }
     return reply(
       {error: {type: 'invalid_request_error', message: `No route for ${url.pathname}`}},
       404,
@@ -130,7 +134,7 @@ export function fakeStripe(options: FakeStripeOptions = {}) {
     httpClient: Stripe.createFetchHttpClient(fetchFn),
     maxNetworkRetries: 0,
   })
-  return {stripe, calls, intentMetadata}
+  return {stripe, calls, metadata}
 }
 
 export const WEBHOOK_SECRET = 'whsec_test_secret'

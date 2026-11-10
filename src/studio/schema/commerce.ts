@@ -3,9 +3,10 @@ import {TagIcon} from '@sanity/icons/Tag'
 import {defineArrayMember, defineField, defineType} from 'sanity'
 
 import type {Availability} from '../../core/cart'
-import {asArray, isObject} from '../../core/guards'
+import {isObject} from '../../core/guards'
 import {COMMERCE_TYPE, VARIANT_TYPE} from '../../core/ids'
 import {moneyTitle, type ResolvedConfig} from '../config'
+import {CommerceInput} from '../StockInput'
 
 const AVAILABILITY: Array<{title: string; value: Availability}> = [
   {title: 'On sale', value: 'onSale'},
@@ -17,23 +18,22 @@ export interface StripeVariantValue {
   _key: string
   label: string
   availability?: Availability
-  stockCount?: number
 }
 
-/** The price-and-stock field as the Studio saves it. */
+/**
+ * The price-and-availability field as the Studio saves it, on a document anyone can read. Stock
+ * counts are not in it: they are kept in a private document of their own.
+ */
 export interface StripeCommerceValue {
   availability: Availability
   /** In currency units (25 means €25). */
   price?: number
   taxClass?: string
-  stockCount?: number
   variants?: StripeVariantValue[]
 }
 
-// The field's own value, as validation and `hidden` get it: unknown, and maybe half filled in.
+// The field's own value, as validation gets it: unknown, and maybe half filled in.
 const isOnSale = (commerce: unknown) => isObject(commerce) && commerce.availability === 'onSale'
-const hasVariants = (commerce: unknown) =>
-  isObject(commerce) && asArray(commerce.variants).length > 0
 
 export function createVariantType() {
   return defineType({
@@ -54,24 +54,12 @@ export function createVariantType() {
         options: {list: AVAILABILITY, layout: 'radio', direction: 'horizontal'},
         initialValue: 'onSale',
       }),
-      defineField({
-        name: 'stockCount',
-        title: 'In stock',
-        type: 'number',
-        description: 'Optional. When set, this variant sells out by itself at 0.',
-        validation: (rule) => rule.integer().min(0),
-      }),
     ],
     preview: {
-      select: {title: 'label', availability: 'availability', stockCount: 'stockCount'},
-      prepare: ({title, availability, stockCount}) => ({
+      select: {title: 'label', availability: 'availability'},
+      prepare: ({title, availability}) => ({
         title,
-        subtitle:
-          availability === 'soldOut'
-            ? 'Sold out'
-            : typeof stockCount === 'number'
-              ? `${stockCount} in stock`
-              : 'On sale',
+        subtitle: availability === 'soldOut' ? 'Sold out' : 'On sale',
       }),
     },
   })
@@ -84,6 +72,8 @@ export function createCommerceType(config: ResolvedConfig) {
     title: 'Price and stock',
     type: 'object',
     icon: CreditCardIcon,
+    // Adds the stock boxes, which are saved outside this document.
+    components: {input: CommerceInput},
     fields: [
       defineField({
         name: 'availability',
@@ -121,14 +111,6 @@ export function createCommerceType(config: ResolvedConfig) {
             }),
           ]
         : []),
-      defineField({
-        name: 'stockCount',
-        title: 'In stock',
-        type: 'number',
-        description: 'Optional. When set, the product sells out by itself at 0.',
-        hidden: ({parent}) => hasVariants(parent),
-        validation: (rule) => rule.integer().min(0),
-      }),
       defineField({
         name: 'variants',
         type: 'array',

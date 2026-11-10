@@ -23,7 +23,7 @@ const shirt: CartProduct = {
     price: 29.5,
     variants: [
       {_key: 's', label: 'S', availability: 'soldOut'},
-      {_key: 'm', label: 'M', stockCount: 2},
+      {_key: 'm', label: 'M'},
       {_key: 'l', label: 'L'},
     ],
   },
@@ -96,8 +96,13 @@ describe('useCart', () => {
 })
 
 describe('useBuyBox', () => {
-  it('starts on the first variant on sale, and stops at its stock', () => {
-    const {result} = renderHook(() => useBuyBox(shirt), {wrapper})
+  it('starts on the first variant on sale, and stops at the most one order can hold', () => {
+    const upToTwo = ({children}: {children: ReactNode}) => (
+      <CartProvider storageKey="test-cart" maxQuantity={2}>
+        {children}
+      </CartProvider>
+    )
+    const {result} = renderHook(() => useBuyBox(shirt), {wrapper: upToTwo})
     expect(result.current.variants.map(({_key, available}) => [_key, available])).toEqual([
       ['s', false],
       ['m', true],
@@ -194,6 +199,22 @@ describe('useCheckout', () => {
       problems,
     })
     act(() => result.current.reset())
+    expect(result.current.state).toEqual({status: 'idle'})
+  })
+
+  it('is ready again when the buyer comes back from Stripe with the Back button', async () => {
+    // The fetch never answers, as when the browser has already left for Stripe's page.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => new Promise<Response>(() => {})),
+    )
+    const {result} = renderHook(() => useCheckout(), {wrapper})
+    act(() => void result.current.start('eu'))
+    expect(result.current.state).toEqual({status: 'loading'})
+    // The browser restores the page from its back cache, exactly as it was left.
+    act(() => {
+      window.dispatchEvent(Object.assign(new Event('pageshow'), {persisted: true}))
+    })
     expect(result.current.state).toEqual({status: 'idle'})
   })
 

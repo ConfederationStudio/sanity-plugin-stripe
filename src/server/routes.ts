@@ -14,12 +14,13 @@ import {
   type ShippingRegion,
   type ShopSettings,
 } from '../core/regions'
+import type {ProductStock} from '../core/stock'
 import {buildCheckoutSession} from './checkout'
 import {classifyEvent, verifyEvent} from './events'
-import {runOnce} from './once'
+import {once} from './once'
 import {getOrder, type Order} from './order'
 import type {SanityReader, SanityWriter} from './sanity'
-import {decrementStock, type StockChange} from './stock'
+import {decrementStock, readStock, type StockChange} from './stock'
 
 type Handler = (request: Request) => Promise<Response>
 type Log = (level: 'info' | 'warn' | 'error', message: string) => void
@@ -34,6 +35,9 @@ const json = (body: unknown, status = 200) =>
   })
 
 const reason = (error: unknown) => (error instanceof Error ? error.message : String(error))
+
+/** Stripe wants 30 minutes at least, counted on its own clock: leave a minute's margin. */
+const SHORTEST_EXPIRY = 31 * 60
 
 // Checkout
 
@@ -60,8 +64,16 @@ const CHECKOUT_MESSAGES: CheckoutMessages = {
 export interface CheckoutRouteOptions {
   /** From `createStripe`. Without one the route answers 503, so a site runs before it has keys. */
   stripe: Stripe | null | undefined
-  /** Reads products and the shop settings. It must skip the CDN, so prices and stock are fresh. */
+  /**
+   * Reads products and the shop settings, without a token, so it sees published documents only.
+   * It must skip the CDN, so prices are fresh.
+   */
   client: SanityReader
+  /**
+   * A Sanity client with a token, to read stock counts, which the public can't. Without it nothing
+   * is counted and the shop sells by the on-sale switch alone.
+   */
+  stockClient?: SanityReader | null
   /** ISO 4217 code, the same one the Studio plugin has. */
   currency: string
   /**
@@ -71,15 +83,21 @@ export interface CheckoutRouteOptions {
   successUrl: string
   /** Where Stripe's back link goes: the cart. A path or a full address. */
   cancelUrl: string
+  /**
+   * Marks this shop's sessions: the webhook fulfils only sessions that carry it, and the Stripe
+   * Dashboard groups them by it. Give the webhook route the same value. End it with 8 random
+   * letters, such as `myshop_qhzvmkpt`.
+   */
+  integrationIdentifier: string
   /** Where the site keeps its products. Default: `product` documents with a `commerce` field. */
   products?: ProductQueryOptions
-  /** Tags the shop's sessions in the Stripe Dashboard. End it with 8 random letters. */
-  integrationIdentifier?: string
   /** Stripe tax rate ids (`txr_…`) by tax class, so receipts show the tax. */
   taxRates?: Partial<Record<string, string>>
   /** Most of one item a buyer can order at once. Default 10. */
   maxQuantity?: number
-  /** Minutes until an unpaid session expires, 30 at least. Stripe's default is 24 hours. */
+  /** Answer "not that many left" without saying how many, when a cart asks for too many. */
+  hideRemaining?: boolean
+  /** Minutes until an unpaid session expires, about 30 at least. Stripe's default is 24 hours. */
   expiresInMinutes?: number
   /** Changes the session before it is created: promotion codes, phone numbers, consent. */
   extend?: (
@@ -99,7 +117,7 @@ export interface CheckoutRouteOptions {
  *
  * ```ts
  * // app/api/checkout/route.ts
- * export const POST = checkoutRoute({stripe, client, currency: 'eur', successUrl, cancelUrl})
+ * export const POST = checkoutRoute({stripe, client, stockClient, currency: 'eur', …})
  * ```
  *
  * It answers `{url}` to go to, or `{error, message, problems}`.
@@ -108,6 +126,7 @@ export function checkoutRoute(options: CheckoutRouteOptions): Handler {
   const {client, currency, log = consoleLog} = options
   const messages = {...CHECKOUT_MESSAGES, ...options.messages}
   const productsQuery = checkoutProductsQuery(options.products)
+  let saidUncounted = false
 
   const unavailable = (detail: string, status = 503) => {
     log('error', `[checkout] ${detail}`)
@@ -118,7 +137,7 @@ export function checkoutRoute(options: CheckoutRouteOptions): Handler {
   }
 
   return async (request) => {
-    const {stripe} = options
+    const {stripe, stockClient} = options
     if (!stripe) return unavailable('There is no Stripe key. Set one in the environment.')
 
     const body: unknown = await request.json().catch(() => null)
@@ -128,15 +147,22 @@ export function checkoutRoute(options: CheckoutRouteOptions): Handler {
     const ids = [...new Set(lines.map((line) => line.productId))]
     let products: CartProduct[]
     let settings: ShopSettings | null
+    let stock: Map<string, ProductStock> | undefined
     try {
-      const [foundProducts, foundSettings] = await Promise.all([
+      const [foundProducts, foundSettings, foundStock] = await Promise.all([
         ids.length ? client.fetch(productsQuery, {ids}) : [],
         client.fetch(SHOP_SETTINGS_QUERY),
+        stockClient ? readStock(stockClient, ids) : undefined,
       ])
       products = readCartProducts(foundProducts)
       settings = readShopSettings(foundSettings)
+      stock = foundStock
     } catch (error) {
       return unavailable(`Sanity could not be read: ${reason(error)}`, 502)
+    }
+    if (!stockClient && !saidUncounted) {
+      saidUncounted = true
+      log('info', '[checkout] No stockClient: stock counts are not checked at checkout.')
     }
     const regions = regionsFromSettings(settings)
     if (!regions.length)
@@ -151,13 +177,17 @@ export function checkoutRoute(options: CheckoutRouteOptions): Handler {
       currency,
       successUrl: absoluteUrl(options.successUrl, origin),
       cancelUrl: absoluteUrl(options.cancelUrl, origin),
-      ...(options.integrationIdentifier
-        ? {integrationIdentifier: options.integrationIdentifier}
-        : {}),
+      integrationIdentifier: options.integrationIdentifier,
+      ...(stock ? {stock} : {}),
+      ...(options.hideRemaining ? {hideRemaining: true} : {}),
       ...(options.taxRates ? {taxRates: options.taxRates} : {}),
       ...(options.maxQuantity ? {maxQuantity: options.maxQuantity} : {}),
       ...(options.expiresInMinutes
-        ? {expiresAt: Math.floor(Date.now() / 1000) + Math.max(30, options.expiresInMinutes) * 60}
+        ? {
+            expiresAt:
+              Math.floor(Date.now() / 1000) +
+              Math.max(SHORTEST_EXPIRY, options.expiresInMinutes * 60),
+          }
         : {}),
     })
 
@@ -192,10 +222,15 @@ function absoluteUrl(url: string, origin: string): string {
 // Webhook
 
 export interface OrderContext {
-  /** The shop settings as published, with the order email. Null before they are published. */
+  /** The shop settings as published. Null before they are published. */
   settings: ShopSettings | null
-  /** What the order did to stock counts. Empty when nothing ordered has a count. */
+  /** What the order did to stock counts. Empty when nothing ordered is counted. */
   stock: StockChange[]
+  /**
+   * Set when stock could not be lowered, with the reason: say so to whoever packs the order.
+   * Stripe is asked to deliver the event again, and only the stock is tried again.
+   */
+  stockError?: string
   session: Stripe.Checkout.Session
   stripe: Stripe
 }
@@ -205,10 +240,15 @@ export interface WebhookRouteOptions {
   stripe: Stripe | null | undefined
   /** The endpoint's signing secret (`whsec_…`), from the environment. */
   webhookSecret: string | undefined
-  /** Reads the shop settings. It must skip the CDN. */
+  /** The same value the checkout route has. Sessions without it are not this shop's. */
+  integrationIdentifier: string
+  /** Reads the shop settings, without a token. It must skip the CDN. */
   client: SanityReader
-  /** Lowers stock counts when an order is paid. Without one, stock is left as it is. */
-  writeClient?: SanityWriter | null
+  /**
+   * A Sanity client with a token that can write, to lower stock counts when an order is paid.
+   * Without one, stock is left as it is.
+   */
+  stockClient?: SanityWriter | null
   /** Where the site keeps its products. The same as the checkout route's. */
   products?: ProductQueryOptions
   /**
@@ -222,12 +262,14 @@ export interface WebhookRouteOptions {
 }
 
 /**
- * The site's Stripe webhook. A paid order lowers stock and calls `onOrder`, each once per
- * payment however often Stripe delivers the event. Nothing is fulfilled on the thank-you page.
+ * The site's Stripe webhook. A paid order of this shop lowers stock and calls `onOrder`, each
+ * once per payment however often Stripe delivers the event. Payments made any other way on the
+ * same Stripe account (a Payment Link, another site) are left alone. Nothing is fulfilled on the
+ * thank-you page.
  *
  * ```ts
  * // app/api/stripe/webhook/route.ts
- * export const POST = webhookRoute({stripe, webhookSecret, client, writeClient, onOrder})
+ * export const POST = webhookRoute({stripe, webhookSecret, integrationIdentifier, client, …})
  * ```
  *
  * Point a Stripe webhook endpoint at it with the events in `WEBHOOK_EVENTS`.
@@ -236,11 +278,24 @@ export function webhookRoute(options: WebhookRouteOptions): Handler {
   const {client, log = consoleLog} = options
   // Fail when the site starts, not on the first order.
   resolveProductQuery(options.products)
+  let saidUncounted = false
+
+  /**
+   * The session as this client's API version shapes it, or null when it isn't this shop's. The
+   * event carries the session as the endpoint's version shapes it, so it is read again.
+   */
+  const ownSession = async (stripe: Stripe, sessionId: string) => {
+    const session = await stripe.checkout.sessions.retrieve(sessionId)
+    const own =
+      session.mode === 'payment' && session.integration_identifier === options.integrationIdentifier
+    if (!own) log('info', `[stripe webhook] ${sessionId}: not one of this shop's, left alone.`)
+    return own ? session : null
+  }
 
   const fulfil = async (stripe: Stripe, sessionId: string) => {
-    // The event carries the session as the endpoint's API version shapes it. Read it again, as
-    // this client's version shapes it, and trust that one's payment status.
-    const session = await stripe.checkout.sessions.retrieve(sessionId)
+    const session = await ownSession(stripe, sessionId)
+    if (!session) return
+    // Trust the payment status Stripe's API gives now over the one in the event.
     if (session.payment_status === 'unpaid') {
       log('info', `[stripe webhook] ${sessionId}: not paid yet.`)
       return
@@ -252,27 +307,48 @@ export function webhookRoute(options: WebhookRouteOptions): Handler {
     const settings = readShopSettings(foundSettings)
 
     let stock: StockChange[] = []
-    if (options.writeClient) {
-      const result = await decrementStock(options.writeClient, order, {
-        autoSoldOut: settings?.autoSoldOut ?? true,
-        ...(options.products ? {products: options.products} : {}),
-      })
-      stock = result.changes
-      if (result.status === 'lowered') {
-        const summary = stock
-          .map((change) => `${change.documentId} ${change.from} → ${change.to}`)
-          .join(', ')
-        log('info', `[stripe webhook] ${sessionId}: stock ${summary}`)
+    let stockError: string | undefined
+    if (options.stockClient) {
+      try {
+        const result = await decrementStock(options.stockClient, order, {
+          autoSoldOut: settings?.autoSoldOut ?? true,
+          ...(options.products ? {products: options.products} : {}),
+        })
+        stock = result.changes
+        if (result.status === 'lowered') {
+          const summary = stock
+            .map(
+              ({productId, variantKey, from, to}) =>
+                `${productId}${variantKey ? ` ${variantKey}` : ''} ${from} → ${to}`,
+            )
+            .join(', ')
+          log('info', `[stripe webhook] ${sessionId}: stock ${summary}`)
+        }
+      } catch (error) {
+        // The order still has to reach the shop. It is told, and Stripe is asked to come back.
+        stockError = reason(error)
+        log('error', `[stripe webhook] ${sessionId}: stock was not lowered: ${stockError}`)
       }
+    } else if (!saidUncounted) {
+      saidUncounted = true
+      log('info', '[stripe webhook] No stockClient: stock counts are left as they are.')
     }
 
     const {onOrder} = options
     if (onOrder) {
-      const outcome = await runOnce(stripe, order.paymentIntentId, 'order', async () => {
-        await onOrder(order, {settings, stock, session, stripe})
+      const outcome = await once(stripe, session, 'order', async () => {
+        await onOrder(order, {
+          settings,
+          stock,
+          ...(stockError ? {stockError} : {}),
+          session,
+          stripe,
+        })
       })
       log('info', `[stripe webhook] ${sessionId}: order ${outcome}.`)
     }
+
+    if (stockError) throw new Error(`Stock was not lowered: ${stockError}`)
   }
 
   return async (request) => {
@@ -301,10 +377,14 @@ export function webhookRoute(options: WebhookRouteOptions): Handler {
         case 'pending':
           log('info', `[stripe webhook] ${result.session.id}: waiting for a delayed payment.`)
           break
-        case 'failed':
-          log('warn', `[stripe webhook] ${result.session.id}: the delayed payment failed.`)
-          await options.onPaymentFailed?.(result.session)
+        case 'failed': {
+          const session = await ownSession(stripe, result.session.id)
+          if (session) {
+            log('warn', `[stripe webhook] ${session.id}: the delayed payment failed.`)
+            await options.onPaymentFailed?.(session)
+          }
           break
+        }
         case 'ignored':
           break
       }

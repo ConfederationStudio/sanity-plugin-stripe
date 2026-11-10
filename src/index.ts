@@ -9,11 +9,5 @@ export type {ShippingRegionValue, ShopSettingsValue} from './studio/schema/setti
 export {isShopSettingsListItem, shopSettingsListItem} from './studio/structure'
 
 export type {Availability} from './core/cart'
-export {EU_COUNTRIES, STRIPE_SHIPPING_COUNTRIES} from './core/countries'
-export {
-  COMMERCE_TYPE,
-  SHIPPING_REGION_TYPE,
-  SHOP_SETTINGS_ID,
-  SHOP_SETTINGS_TYPE,
-  VARIANT_TYPE,
-} from './core/ids'
+export {EU_COUNTRIES} from './core/countries'
+export {COMMERCE_TYPE, SHOP_SETTINGS_ID, SHOP_SETTINGS_TYPE} from './core/ids'

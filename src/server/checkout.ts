@@ -11,6 +11,7 @@ import {
 } from '../core/cart'
 import {toMinorUnits} from '../core/money'
 import {resolveRegions, type ShippingRegion} from '../core/regions'
+import {stockLeft, type ProductStock} from '../core/stock'
 
 /**
  * Builds a Checkout Session from the cart and fresh product data. Nothing here trusts a price
@@ -27,18 +28,22 @@ export interface CheckoutInput {
   regionId: unknown
   /** Fresh product data (not from a CDN cache) for every product in the cart. */
   products: readonly CartProduct[]
+  /** Stock by product id, from `readStock`. Without it nothing is counted. */
+  stock?: ReadonlyMap<string, ProductStock>
   /** Shipping regions from the shop settings, before `resolveRegions`. */
   regions: readonly ShippingRegion[]
   /** ISO 4217 code, such as `eur`. */
   currency: string
   successUrl: string
   cancelUrl: string
-  /** Tags the session in the Stripe Dashboard. End it with 8 random letters. */
-  integrationIdentifier?: string
+  /** Marks the session as this shop's, for the webhook and the Stripe Dashboard. */
+  integrationIdentifier: string
   /** Stripe tax rate ids (`txr_…`) by tax class, so receipts show the tax. */
   taxRates?: Partial<Record<string, string>>
   /** Most of one item a buyer can order at once. Default 10. */
   maxQuantity?: number
+  /** Don't say how many are left when a cart asks for too many. */
+  hideRemaining?: boolean
   /** When the session stops taking payment, as a Unix time. Stripe's default is 24 hours on. */
   expiresAt?: number
 }
@@ -76,10 +81,24 @@ export function buildCheckoutSession(input: CheckoutInput): CheckoutResult {
       continue
     }
     const name = lineName(product, status.variant)
-    if (line.quantity > status.maxQuantity) {
-      problems.push({...ref, name, reason: 'tooMany', maxQuantity: status.maxQuantity})
+
+    // Counts are private, so this is the one place a buyer meets them.
+    const left = stockLeft(input.stock?.get(line.productId), line.variantKey)
+    if (left !== null && left <= 0) {
+      problems.push({...ref, name, reason: 'soldOut'})
       continue
     }
+    const most = left === null ? status.maxQuantity : Math.min(status.maxQuantity, left)
+    if (line.quantity > most) {
+      problems.push({
+        ...ref,
+        name,
+        reason: 'tooMany',
+        ...(input.hideRemaining ? {} : {maxQuantity: most}),
+      })
+      continue
+    }
+
     const taxClass = product.commerce?.taxClass
     const taxRate = taxClass ? input.taxRates?.[taxClass] : undefined
     lineItems.push({
@@ -121,8 +140,8 @@ export function buildCheckoutSession(input: CheckoutInput): CheckoutResult {
       success_url: input.successUrl,
       cancel_url: input.cancelUrl,
       metadata: {region: region.id, regionTitle: region.title},
+      integration_identifier: input.integrationIdentifier,
       ...(input.expiresAt ? {expires_at: input.expiresAt} : {}),
-      ...(input.integrationIdentifier ? {integration_identifier: input.integrationIdentifier} : {}),
     },
   }
 }

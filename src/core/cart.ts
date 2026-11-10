@@ -17,10 +17,12 @@ export interface CartVariant {
   _key: string
   label?: string | null
   availability?: Availability | null
-  stockCount?: number | null
 }
 
-/** A product as the cart and the checkout read it from Sanity: see `cartProductProjection`. */
+/**
+ * A product as the cart and the checkout read it from Sanity: see `cartProductProjection`. It
+ * says whether the product is on sale, never how many are left: counts are private.
+ */
 export interface CartProduct {
   _id: string
   title?: string | null
@@ -31,7 +33,6 @@ export interface CartProduct {
     /** In currency units (25 means €25). */
     price?: number | null
     taxClass?: string | null
-    stockCount?: number | null
     variants?: CartVariant[] | null
   } | null
 }
@@ -57,6 +58,9 @@ export function lineKey(line: Pick<CartLine, 'productId' | 'variantKey'>): strin
 /**
  * Turns anything (stored JSON, a request body) into valid cart lines: drops what doesn't parse,
  * merges duplicates and keeps quantities between 1 and `max`.
+ *
+ * A product id with a dot is dropped: a published document's id has none, so a draft or a copy
+ * inside a release can never be put in a cart, whatever the site's Sanity client is able to read.
  */
 export function sanitizeLines(input: unknown, max = MAX_QUANTITY): CartLine[] {
   const merged = new Map<string, CartLine>()
@@ -64,6 +68,7 @@ export function sanitizeLines(input: unknown, max = MAX_QUANTITY): CartLine[] {
     if (!isObject(item)) continue
     const {productId, variantKey, quantity} = item
     if (typeof productId !== 'string' || !productId || productId.length > 200) continue
+    if (productId.includes('.')) continue
     if (variantKey !== undefined && (typeof variantKey !== 'string' || variantKey.length > 200))
       continue
     if (typeof quantity !== 'number' || !Number.isFinite(quantity)) continue
@@ -84,8 +89,8 @@ export type LineStatus =
   | {available: false; reason: Unavailable}
 
 /**
- * Whether a product (and variant) can be bought, and how many. A stock count of 0 or less counts
- * as sold out, whatever the availability switch says.
+ * Whether a product (and variant) is on sale, as far as anyone can see. Stock counts are private,
+ * so they are checked by the checkout route, on the server.
  */
 export function lineStatus(
   product: CartProduct | undefined,
@@ -99,20 +104,16 @@ export function lineStatus(
 
   const variants = commerce.variants ?? []
   let variant: CartVariant | undefined
-  let stock = commerce.stockCount
   if (variants.length) {
     if (!variantKey) return {available: false, reason: 'chooseVariant'}
     variant = variants.find((candidate) => candidate._key === variantKey)
     if (!variant) return {available: false, reason: 'variantMissing'}
     if (variant.availability === 'soldOut') return {available: false, reason: 'soldOut'}
-    stock = variant.stockCount
   } else if (variantKey) {
     return {available: false, reason: 'variantMissing'}
   }
 
-  if (typeof stock === 'number' && stock <= 0) return {available: false, reason: 'soldOut'}
-  const maxQuantity = typeof stock === 'number' ? Math.min(max, stock) : max
-  return {available: true, maxQuantity, price: commerce.price, variant}
+  return {available: true, maxQuantity: max, price: commerce.price, variant}
 }
 
 /** Display name for a line: the product title, plus the variant label when there is one. */
@@ -130,7 +131,7 @@ export interface CheckoutProblem {
   variantKey?: string
   name?: string
   reason: Unavailable | 'tooMany'
-  /** For `tooMany`: how many can be ordered. */
+  /** For `tooMany`: how many can be ordered. Left out when the shop hides what is left. */
   maxQuantity?: number
 }
 

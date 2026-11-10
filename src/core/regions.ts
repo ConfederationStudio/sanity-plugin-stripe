@@ -21,7 +21,6 @@ export interface ShopSettings {
     countries?: string[] | null
     rate?: number | null
   }> | null
-  orderEmail?: string | null
   autoSoldOut?: boolean | null
 }
 
@@ -44,7 +43,6 @@ export function readShopSettings(value: unknown): ShopSettings | null {
           ]
         : [],
     ),
-    orderEmail: asString(value.orderEmail),
     autoSoldOut: typeof value.autoSoldOut === 'boolean' ? value.autoSoldOut : null,
   }
 }

@@ -1,14 +1,33 @@
-import {asArray, asNumber, isObject} from '../core/guards'
-import {STOCK_RECORD_TYPE, stockRecordId} from '../core/ids'
-import {resolveProductQuery, stockQuery, type ProductQueryOptions} from '../core/queries'
+import {asArray, isObject} from '../core/guards'
+import {publishedId, STOCK_CHANGE_TYPE, stockChangeId, stockId} from '../core/ids'
+import {productVersionsQuery, resolveProductQuery, type ProductQueryOptions} from '../core/queries'
+import {readStockDocuments, STOCK_QUERY, stockLeft, type ProductStock} from '../core/stock'
 import type {OrderItem} from './order'
-import type {SanityWriter} from './sanity'
+import {rawReader, rawWriter, type SanityReader, type SanityWriter} from './sanity'
 
 const SAFE_KEY = /^[\w-]+$/
 
+/** Stripe stops redelivering an event after three days; a month leaves a wide margin. */
+const KEEP_CHANGES_DAYS = 30
+
+/**
+ * The stock of the given products, by product id, read from their private stock documents. The
+ * client needs a token. A product without a stock document isn't counted and has no entry.
+ *
+ * A site can use it on the server to say "only 2 left"; it should never send the counts of
+ * everything to the browser.
+ */
+export async function readStock(
+  client: SanityReader,
+  productIds: readonly string[],
+): Promise<Map<string, ProductStock>> {
+  const ids = productIds.filter((id) => id && !id.includes('.')).map((id) => stockId(id))
+  if (!ids.length) return new Map()
+  return readStockDocuments(await rawReader(client).fetch(STOCK_QUERY, {ids}))
+}
+
+/** What an order did to one stock count. */
 export interface StockChange {
-  /** The document that was changed: the published product, or its draft. */
-  documentId: string
   productId: string
   variantKey?: string
   from: number
@@ -30,53 +49,53 @@ export interface StockOptions {
   autoSoldOut?: boolean
   /** Where the site keeps its products. */
   products?: ProductQueryOptions
-}
-
-interface StockDocument {
-  _id: string
-  stockCount: number | null
-  variants: Array<{_key: string; stockCount: number | null}>
-}
-
-function readStockDocuments(value: unknown): StockDocument[] {
-  return asArray(value).flatMap((item) => {
-    if (!isObject(item) || typeof item._id !== 'string') return []
-    const commerce = isObject(item.commerce) ? item.commerce : {}
-    return [
-      {
-        _id: item._id,
-        stockCount: asNumber(commerce.stockCount),
-        variants: asArray(commerce.variants).flatMap((variant) =>
-          isObject(variant) && typeof variant._key === 'string'
-            ? [{_key: variant._key, stockCount: asNumber(variant.stockCount)}]
-            : [],
-        ),
-      },
-    ]
-  })
+  /** The current time, for tests. */
+  now?: Date
 }
 
 function readChanges(value: unknown): StockChange[] {
   return asArray(value).flatMap((item) => {
     if (!isObject(item)) return []
-    const {documentId, productId, variantKey, from, to} = item
-    if (typeof documentId !== 'string' || typeof productId !== 'string') return []
+    const {productId, variantKey, from, to} = item
+    if (typeof productId !== 'string') return []
     if (typeof from !== 'number' || typeof to !== 'number') return []
-    const change: StockChange = {documentId, productId, from, to}
+    const change: StockChange = {productId, from, to}
     if (typeof variantKey === 'string') change.variantKey = variantKey
     return [change]
   })
 }
 
+interface ProductVersion {
+  _id: string
+  variants: string[]
+}
+
+function readVersions(value: unknown): ProductVersion[] {
+  return asArray(value).flatMap((item) =>
+    isObject(item) && typeof item._id === 'string'
+      ? [
+          {
+            _id: item._id,
+            variants: asArray(item.variants).filter(
+              (key): key is string => typeof key === 'string',
+            ),
+          },
+        ]
+      : [],
+  )
+}
+
 const isConflict = (error: unknown) => isObject(error) && error.statusCode === 409
 
 /**
- * Lowers the stock count of every ordered product or variant that has one, in the published
- * document and in its draft (so publishing a draft doesn't put the old count back). Products and
- * variants without a stock count are left alone.
+ * Lowers the stock count of every ordered product or variant that has one. Products and variants
+ * without a count are left alone. When a count reaches 0 and `autoSoldOut` is on, the product or
+ * variant is marked sold out in every version of the product document, so publishing a draft or a
+ * release can't put it back on sale.
  *
  * It happens once per Checkout Session, however often it is called: the counts change in one
  * transaction with a record of the session, and Sanity refuses a second record with the same id.
+ * The record holds product ids and counts only.
  */
 export async function decrementStock(
   client: SanityWriter,
@@ -85,18 +104,23 @@ export async function decrementStock(
 ): Promise<StockResult> {
   const {field} = resolveProductQuery(options.products)
   const autoSoldOut = options.autoSoldOut ?? true
+  const now = options.now ?? new Date()
 
-  const ordered = new Map<string, number>()
+  const ordered: Array<{productId: string; variantKey?: string; quantity: number}> = []
   for (const item of order.items) {
-    if (!item.productId || (item.variantKey && !SAFE_KEY.test(item.variantKey))) continue
-    const key = `${item.productId}:${item.variantKey ?? ''}`
-    ordered.set(key, (ordered.get(key) ?? 0) + item.quantity)
+    const {productId, variantKey, quantity} = item
+    if (!productId || productId.includes('.')) continue
+    if (variantKey && !SAFE_KEY.test(variantKey)) continue
+    const same = ordered.find(
+      (line) => line.productId === productId && line.variantKey === variantKey,
+    )
+    if (same) same.quantity += quantity
+    else ordered.push(variantKey ? {productId, variantKey, quantity} : {productId, quantity})
   }
-  if (!ordered.size) return {status: 'untracked', changes: []}
+  if (!ordered.length) return {status: 'untracked', changes: []}
 
-  // Drafts and the record are only visible with the raw perspective and a token.
-  const raw = client.withConfig?.({perspective: 'raw', useCdn: false}) ?? client
-  const recordId = stockRecordId(order.sessionId)
+  const raw = rawWriter(client)
+  const recordId = stockChangeId(order.sessionId)
   const readRecord = async (): Promise<StockChange[] | null> => {
     const record = await raw.fetch(`*[_id == $id][0]{changes}`, {id: recordId})
     return isObject(record) ? readChanges(record.changes) : null
@@ -105,48 +129,62 @@ export async function decrementStock(
   const before = await readRecord()
   if (before) return {status: 'already', changes: before}
 
-  const productIds = [...new Set([...ordered.keys()].map((key) => key.split(':')[0] ?? ''))]
-  const documents = readStockDocuments(
-    await raw.fetch(stockQuery(options.products), {
-      ids: productIds.flatMap((id) => [id, `drafts.${id}`]),
-    }),
-  )
+  const productIds = [...new Set(ordered.map((line) => line.productId))]
+  const stock = await readStock(raw, productIds)
 
   const changes: StockChange[] = []
-  const patches: Array<{id: string; dec: Record<string, number>; set: Record<string, unknown>}> = []
-  for (const document of documents) {
-    const productId = document._id.replace(/^drafts\./, '')
-    const dec: Record<string, number> = {}
-    const set: Record<string, unknown> = {}
-    for (const [key, quantity] of ordered) {
-      const [id, variantKey] = key.split(':')
-      if (id !== productId) continue
-      const from = variantKey
-        ? document.variants.find((variant) => variant._key === variantKey)?.stockCount
-        : document.stockCount
-      if (typeof from !== 'number') continue
-      const path = variantKey ? `${field}.variants[_key=="${variantKey}"]` : field
-      const to = from - quantity
-      dec[`${path}.stockCount`] = quantity
-      if (autoSoldOut && to <= 0) set[`${path}.availability`] = 'soldOut'
-      const change: StockChange = {documentId: document._id, productId, from, to}
-      if (variantKey) change.variantKey = variantKey
-      changes.push(change)
-    }
-    if (Object.keys(dec).length) patches.push({id: document._id, dec, set})
+  const lower = new Map<string, Record<string, number>>()
+  for (const {productId, variantKey, quantity} of ordered) {
+    const from = stockLeft(stock.get(productId), variantKey)
+    if (from === null) continue
+    const dec = lower.get(productId) ?? {}
+    dec[variantKey ? `variants[_key=="${variantKey}"].stockCount` : 'stockCount'] = quantity
+    lower.set(productId, dec)
+    const change: StockChange = {productId, from, to: from - quantity}
+    if (variantKey) change.variantKey = variantKey
+    changes.push(change)
   }
   if (!changes.length) return {status: 'untracked', changes: []}
 
+  // The public sees "sold out", never the count: set it on every version of the product.
+  const soldOut = autoSoldOut ? changes.filter((change) => change.to <= 0) : []
+  const mark = new Map<string, Record<string, string>>()
+  if (soldOut.length) {
+    const {query, params} = productVersionsQuery(
+      [...new Set(soldOut.map((change) => change.productId))],
+      options.products,
+    )
+    for (const version of readVersions(await raw.fetch(query, params))) {
+      const productId = publishedId(version._id)
+      const set: Record<string, string> = {}
+      for (const change of soldOut) {
+        if (change.productId !== productId) continue
+        if (!change.variantKey) set[`${field}.availability`] = 'soldOut'
+        else if (version.variants.includes(change.variantKey))
+          set[`${field}.variants[_key=="${change.variantKey}"].availability`] = 'soldOut'
+      }
+      if (Object.keys(set).length) mark.set(version._id, set)
+    }
+  }
+
+  const cutoff = new Date(now.getTime() - KEEP_CHANGES_DAYS * 24 * 60 * 60 * 1000)
+  const old = asArray(
+    await raw.fetch(`*[_type == $type && loweredAt < $before][0...25]._id`, {
+      type: STOCK_CHANGE_TYPE,
+      before: cutoff.toISOString(),
+    }),
+  ).filter((id): id is string => typeof id === 'string')
+
   const transaction = client.transaction().create({
     _id: recordId,
-    _type: STOCK_RECORD_TYPE,
+    _type: STOCK_CHANGE_TYPE,
     sessionId: order.sessionId,
-    loweredAt: new Date().toISOString(),
+    loweredAt: now.toISOString(),
     changes: changes.map((change, index) => Object.assign({_key: `change-${index}`}, change)),
   })
-  for (const {id, dec, set} of patches) {
-    transaction.patch(id, Object.keys(set).length ? {dec, set} : {dec})
-  }
+  for (const [productId, dec] of lower) transaction.patch(stockId(productId), {dec})
+  for (const [documentId, set] of mark) transaction.patch(documentId, {set})
+  for (const documentId of old) transaction.delete(documentId)
 
   try {
     await transaction.commit()

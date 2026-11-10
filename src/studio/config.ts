@@ -1,5 +1,8 @@
 import {priceDecimals} from '../core/money'
 
+/** The Studio's API version for the plugin's own reads and writes. */
+export const API_VERSION = '2025-02-19'
+
 /** A tax class an editor can give a product, such as a reduced and a standard VAT rate. */
 export interface TaxClass {
   /** What the editor reads, such as "Printed matter (9%)". */
@@ -30,9 +33,8 @@ export interface StripeCommerceConfig {
     /** Tax classes editors choose from. Without any, products have no tax class field. */
     classes?: readonly TaxClass[]
   }
-  /** Starting values for the shop settings document, used when it is first created. */
+  /** Starting values for the shop settings document, offered while it has no regions. */
   shop?: {
-    orderEmail?: string
     shippingRegions?: readonly ShippingRegionInput[]
   }
 }
@@ -44,7 +46,7 @@ export interface ResolvedConfig {
   currencyLabel: string
   priceDecimals: 0 | 2
   tax: {label: string; included: boolean; classes: readonly TaxClass[]}
-  shop: {orderEmail?: string; shippingRegions: readonly ShippingRegionInput[]}
+  shop: {shippingRegions: readonly ShippingRegionInput[]}
 }
 
 export function resolveConfig(config: StripeCommerceConfig): ResolvedConfig {
@@ -62,10 +64,7 @@ export function resolveConfig(config: StripeCommerceConfig): ResolvedConfig {
       included: config.tax?.included ?? true,
       classes: config.tax?.classes ?? [],
     },
-    shop: {
-      orderEmail: config.shop?.orderEmail,
-      shippingRegions: config.shop?.shippingRegions ?? [],
-    },
+    shop: {shippingRegions: config.shop?.shippingRegions ?? []},
   }
 }
 
