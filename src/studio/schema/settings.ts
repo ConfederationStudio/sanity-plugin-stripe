@@ -107,11 +107,16 @@ export function createShippingRegionType(config: ResolvedConfig) {
         title,
         subtitle: [
           typeof rate === 'number' ? formatPrice(rate, config.currency) : 'No rate',
-          everywhereElse ? 'every other country' : `${asArray(countries).length} countries`,
+          everywhereElse ? 'every other country' : countCountries(asArray(countries).length),
         ].join(' · '),
       }),
     },
   })
+}
+
+/** How many countries a region lists, for its line in the Studio. */
+export function countCountries(count: number): string {
+  return count === 1 ? '1 country' : `${count} countries`
 }
 
 export function createShopSettingsType(config: ResolvedConfig) {
@@ -124,6 +129,7 @@ export function createShopSettingsType(config: ResolvedConfig) {
     fields: [
       defineField({
         name: 'shippingRegions',
+        title: 'Shipping regions',
         type: 'array',
         description:
           'Buyers choose one in the cart. Its rate is added at checkout, and Stripe only accepts addresses in its countries.',

@@ -6,8 +6,13 @@ import {COMMERCE_TYPE, SHOP_SETTINGS_TYPE, stockId} from '../core/ids'
 import {moneyTitle, resolveConfig} from './config'
 import {settingsActions, withoutSettingsTemplate} from './plugin'
 import {createCommerceType, createVariantType} from './schema/commerce'
-import {createShippingRegionType, createShopSettingsType, initialRegions} from './schema/settings'
-import {loadStock, parseCount, saveStock} from './stock'
+import {
+  countCountries,
+  createShippingRegionType,
+  createShopSettingsType,
+  initialRegions,
+} from './schema/settings'
+import {loadStock, parseCount, saveStock, stockFromDocument} from './stock'
 
 const fieldNames = (type: {fields: ReadonlyArray<{name: string}>}) =>
   type.fields.map((field) => field.name)
@@ -124,6 +129,15 @@ describe('the shop settings', () => {
     expect(initialRegions(config)[2]).not.toHaveProperty('countries')
   })
 
+  it('name the regions field and count a region’s countries in plain words', () => {
+    expect(field(createShopSettingsType(config), 'shippingRegions')).toMatchObject({
+      title: 'Shipping regions',
+    })
+    expect(countCountries(1)).toBe('1 country')
+    expect(countCountries(26)).toBe('26 countries')
+    expect(countCountries(0)).toBe('0 countries')
+  })
+
   it('start empty when the options name no regions', () => {
     const settings = createShopSettingsType(resolveConfig({currency: 'usd'}))
     expect(field(settings, 'shippingRegions')).not.toHaveProperty('initialValue')
@@ -160,6 +174,21 @@ describe('stock boxes', () => {
     const {writer} = fakeDataset()
     expect(await loadStock(writer, 'magazine')).toEqual({stockCount: 3, variants: []})
     expect(await loadStock(writer, 'poster')).toEqual({stockCount: null, variants: []})
+  })
+
+  it('follow the counts a change brings, without asking again', () => {
+    const changed = {_id: stockId('shirt'), variants: [{_key: 'l', stockCount: 4}]}
+    expect(stockFromDocument('shirt', changed)).toEqual({
+      stockCount: null,
+      variants: [{_key: 'l', stockCount: 4}],
+    })
+    // The stock document was deleted: nothing is counted any more.
+    expect(stockFromDocument('shirt', undefined)).toEqual({stockCount: null, variants: []})
+    // Another product's document says nothing about this one.
+    expect(stockFromDocument('shirt', {_id: stockId('poster'), stockCount: 2})).toEqual({
+      stockCount: null,
+      variants: [],
+    })
   })
 
   it('can’t be read without a token', async () => {

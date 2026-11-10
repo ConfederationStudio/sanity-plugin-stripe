@@ -35,6 +35,15 @@ export async function loadStock(client: StockClient, productId: string): Promise
   return readStockDocuments(found).get(productId) ?? EMPTY
 }
 
+/**
+ * A product's stock from its stock document, as a change event carries it, or empty counts when
+ * the document is gone. A query asked right after an event can still answer with the counts from
+ * before it, so the boxes take the document the event brings.
+ */
+export function stockFromDocument(productId: string, document: unknown): ProductStock {
+  return readStockDocuments(document ? [document] : []).get(productId) ?? EMPTY
+}
+
 /** What an editor typed in a stock box: a whole number from 0 up, or nothing for "not counted". */
 export function parseCount(text: string): number | null | 'invalid' {
   const trimmed = text.trim()

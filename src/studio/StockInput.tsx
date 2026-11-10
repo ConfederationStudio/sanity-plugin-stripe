@@ -6,7 +6,7 @@ import {asArray, isObject} from '../core/guards'
 import {publishedId, stockId} from '../core/ids'
 import type {ProductStock} from '../core/stock'
 import {API_VERSION} from './config'
-import {loadStock, parseCount, saveStock, stockLeft} from './stock'
+import {loadStock, parseCount, saveStock, stockFromDocument, stockLeft} from './stock'
 
 /**
  * The price-and-availability field, with the stock boxes under it. The boxes don't belong to the
@@ -50,21 +50,29 @@ function StockBoxes({commerce, readOnly}: {commerce: unknown; readOnly: boolean}
   const [stock, setStock] = useState<ProductStock | null>(null)
   const [failure, setFailure] = useState<string | null>(null)
 
-  // Read the counts, and read them again when they change: an order lowers them while the form
-  // is open.
+  // Read the counts, and follow them while the form is open: an order lowers them.
   useEffect(() => {
     if (!productId) return undefined
     let live = true
+    let changed = false
     const read = async () => {
       const found = await loadStock(client, productId).catch(() => null)
-      if (!live) return
+      // A change that arrived while this was on its way is newer than what it found.
+      if (!live || changed) return
       if (found) setStock(found)
       setFailure(found ? null : 'The stock counts could not be read.')
     }
     void read()
-    const changes = client
-      .listen('*[_id == $id]', {id: stockId(productId)}, {visibility: 'query'})
-      .subscribe({next: () => void read(), error: () => {}})
+    const changes = client.listen('*[_id == $id]', {id: stockId(productId)}).subscribe({
+      // The event brings the document as it is now. Asking for it again can still get the old one.
+      next: (event) => {
+        if (!live) return
+        changed = true
+        setStock(stockFromDocument(productId, event.result))
+        setFailure(null)
+      },
+      error: () => {},
+    })
     return () => {
       live = false
       changes.unsubscribe()
