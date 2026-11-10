@@ -126,11 +126,19 @@ export async function decrementStock(
     return isObject(record) ? readChanges(record.changes) : null
   }
 
-  const before = await readRecord()
-  if (before) return {status: 'already', changes: before}
-
+  // Three reads at once: Stripe waits for the webhook's answer before it sends the buyer on.
   const productIds = [...new Set(ordered.map((line) => line.productId))]
-  const stock = await readStock(raw, productIds)
+  const cutoff = new Date(now.getTime() - KEEP_CHANGES_DAYS * 24 * 60 * 60 * 1000)
+  const [before, stock, oldRecords] = await Promise.all([
+    readRecord(),
+    readStock(raw, productIds),
+    raw.fetch(`*[_type == $type && loweredAt < $before][0...25]._id`, {
+      type: STOCK_CHANGE_TYPE,
+      before: cutoff.toISOString(),
+    }),
+  ])
+  if (before) return {status: 'already', changes: before}
+  const old = asArray(oldRecords).filter((id): id is string => typeof id === 'string')
 
   const changes: StockChange[] = []
   const lower = new Map<string, Record<string, number>>()
@@ -166,14 +174,6 @@ export async function decrementStock(
       if (Object.keys(set).length) mark.set(version._id, set)
     }
   }
-
-  const cutoff = new Date(now.getTime() - KEEP_CHANGES_DAYS * 24 * 60 * 60 * 1000)
-  const old = asArray(
-    await raw.fetch(`*[_type == $type && loweredAt < $before][0...25]._id`, {
-      type: STOCK_CHANGE_TYPE,
-      before: cutoff.toISOString(),
-    }),
-  ).filter((id): id is string => typeof id === 'string')
 
   const transaction = client.transaction().create({
     _id: recordId,

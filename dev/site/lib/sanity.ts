@@ -20,7 +20,8 @@ const client = standIn
   : createClient({
       projectId,
       dataset,
-      apiVersion: '2025-02-19',
+      // Set SANITY_API_VERSION to try the shop on another version of Sanity's API.
+      apiVersion: process.env.SANITY_API_VERSION ?? '2025-02-19',
       useCdn: false,
       perspective: 'published',
     })

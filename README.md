@@ -2,7 +2,7 @@
 
 Sell from a Sanity site with Stripe Checkout, without a shop platform in between. Editors set price, stock and variants on their own documents in the Studio; the site keeps a cart in the browser and sends buyers to Stripe's payment page; a webhook lowers stock and hands the paid order to your code. Made by Eurico Sá Fernandes at [Confederation Studio](https://github.com/ConfederationStudio). It isn't affiliated with or endorsed by Stripe or Sanity.
 
-> **Status:** not released yet. The test site has taken payments in a Stripe sandbox, from the cart to Stripe's page and back through the webhook: stock went down once, a resent event changed nothing, a declined card fulfilled nothing, and a payment made outside the shop was left alone. Those runs used the test site's sample products, so reading from and writing to a real Sanity dataset is still to be tried, as is a delayed payment method. Treat everything below as a draft until 0.1.0. It targets Sanity Studio 6, React 19.2 and stripe-node 23.
+> **Status:** not released yet. The test site has taken payments in a Stripe sandbox against a real, public Sanity dataset, from the cart to Stripe's page and back through the webhook: stock went down once, also when the same event was delivered twice at the same moment; a resent event changed nothing; a declined card fulfilled nothing; a payment made outside the shop was left alone; and a query without a token could read no stock, no draft and nothing about an order. Still to be tried: the Studio's stock boxes in a browser, a delayed payment method, and a key that may not write. Treat everything below as a draft until 0.1.0. It targets Sanity Studio 6, React 19.2 and stripe-node 23.
 
 - **In the Studio.** A `stripeCommerce` field for any document type: on sale or sold out, price, tax class, variants that each sell out on their own, and optional stock counts. A Shop settings document holds the shipping regions with one flat rate each, and whether stock sells out by itself at 0.
 - **In the browser.** A cart in localStorage that holds product references and quantities, never prices, with hooks for the buy button and the checkout. The markup is yours.
@@ -136,6 +136,8 @@ export const POST = webhookRoute({
 ```
 
 Both take a web `Request` and return a `Response`, so the same handlers fit Remix, Astro, SvelteKit or Hono. `createStripe` pins the Stripe API version the plugin is tested against. The plugin never reads the environment itself: you pass the values in.
+
+Give your email service `order.sessionId` as an idempotency key. Stock is lowered once per payment whatever happens, but when Stripe delivers one event twice in the same moment, `onOrder` can run for both.
 
 The webhook is not optional. It is the only place an order is fulfilled, because a buyer who pays and closes the tab never reaches the thank-you page. It fulfils only sessions that carry your `integrationIdentifier`: a Payment Link or another site on the same Stripe account is left alone.
 
