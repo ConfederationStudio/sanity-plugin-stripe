@@ -2,6 +2,12 @@
 
 Until 1.0, a minor version may change the API. Each change that needs work on a site or Studio says what to do.
 
+## 0.1.1 (2026-11-11)
+
+A packaging fix. Nothing a site or Studio uses has changed, and nothing needs doing beyond updating.
+
+- 0.1.0 went out with an export map that also named the package's source files, which the package doesn't hold. A site whose bundler or `tsconfig` turns on the `source` condition could not find the package. 0.1.1 names the built files alone.
+
 ## 0.1.0 (2026-11-11)
 
 The first release.
