@@ -2,6 +2,21 @@
 
 Until 1.0, a minor version may change the API. Each change that needs work on a site or Studio says what to do.
 
+## Unreleased
+
+Subscriptions, the customer portal, free delivery from an amount and promotion codes. Nothing has to change on a site that sells one-off only.
+
+- **Subscriptions.** A product can offer a subscription: a price per delivery, every so many weeks or months. A cart line can subscribe (`plan: 'subscribe'`), `useBuyBox` gives `subscription`, `plan` and `choosePlan`, and a cart with a subscription becomes a subscription checkout that also charges what is bought once.
+- **Renewals.** `webhookRoute` takes `onRenewal`, called once per paid renewal with the order to send again and the address the customer has now; stock is lowered once per renewal. `onRenewalFailed`, `onSubscriptionEnded` and `onEvent` cover the rest. Add `invoice.paid`, `invoice.payment_failed` and `customer.subscription.deleted` to the webhook endpoint; `WEBHOOK_EVENTS` lists them.
+- **Delivery on a subscription.** Stripe has no shipping options for subscriptions. The Shop settings choose: free, or the region's rate as a line that repeats with the subscription.
+- **`portalRoute()`** sends a subscriber to Stripe's customer portal. Switch its login link on in the Stripe Dashboard.
+- **Free delivery from an amount.** A shipping region can have a "Free from" amount. `shippingQuote()` gives the cart page what will be charged and how much is missing.
+- **`promotionCodes: true`** on `checkoutRoute` shows the code field on Stripe's page.
+- `Order` gains `subscription` and `invoiceId`, and its items `subscription`. `orderEmail` words a renewal as one and links to its invoice.
+- A webhook endpoint that also receives subscription checkouts made outside the shop still leaves them alone; one made by the shop is now fulfilled, where 0.1 ignored every subscription.
+
+Tried on 11 November 2026 in a Stripe sandbox against the public test dataset: a subscription bought in one cart with a one-off item, its delivery as a repeating line, the order email, stock, the subscription ending, free delivery over the amount, and the code field on Stripe's page. A renewal is tested against a stand-in for Stripe's API only: Stripe's test clocks need a claimed sandbox. Not tried: the portal's login link, a promotion code being used.
+
 ## 0.1.1 (2026-11-11)
 
 A packaging fix. Nothing a site or Studio uses has changed, and nothing needs doing beyond updating.
