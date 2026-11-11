@@ -13,6 +13,7 @@ export const POST = checkoutRoute({
   successUrl: '/thanks?session_id={CHECKOUT_SESSION_ID}',
   cancelUrl: '/cart',
   integrationIdentifier: INTEGRATION_IDENTIFIER,
+  promotionCodes: true,
   taxRates: {
     reduced: process.env.STRIPE_TAX_RATE_REDUCED,
     standard: process.env.STRIPE_TAX_RATE_STANDARD,

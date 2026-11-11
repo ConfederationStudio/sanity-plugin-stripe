@@ -44,11 +44,24 @@ const SAMPLE: Doc[] = [
   }),
   // No stock document: it is never counted.
   product('poster', 'Poster', 'poster', {price: 12, taxClass: 'standard'}),
+  // Bought once, or delivered every 6 weeks at a lower price.
+  product('coffee', 'Coffee, 250 g', 'coffee', {
+    price: 9.5,
+    taxClass: 'reduced',
+    subscription: {_type: 'stripeSubscription', enabled: true, price: 8.5, every: 6, unit: 'week'},
+  }),
   {
     _id: 'stripeShopSettings',
     _type: 'stripeShopSettings',
     shippingRegions: [
-      {_key: 'nl', _type: 'stripeShippingRegion', title: 'Netherlands', countries: ['NL'], rate: 5},
+      {
+        _key: 'nl',
+        _type: 'stripeShippingRegion',
+        title: 'Netherlands',
+        countries: ['NL'],
+        rate: 5,
+        freeFrom: 40,
+      },
       {
         _key: 'eu',
         _type: 'stripeShippingRegion',
@@ -65,6 +78,7 @@ const SAMPLE: Doc[] = [
       },
     ],
     autoSoldOut: true,
+    subscriptionDelivery: 'rate',
   },
   // Stock counts live apart from the products, under ids only a token can read.
   {_id: 'stripe.stock.magazine', _type: 'stripe.stock', stockCount: 3},

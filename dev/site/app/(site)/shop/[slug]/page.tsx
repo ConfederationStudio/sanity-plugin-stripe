@@ -38,7 +38,7 @@ export default async function ProductPage({params}: {params: Promise<{slug: stri
                 .join(', ')
             : inStock(stockLeft(stock ?? undefined))}
       </p>
-      <BuyBox product={product} />
+      <BuyBox product={product} currency={CURRENCY} />
     </>
   )
 }

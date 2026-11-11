@@ -18,13 +18,16 @@ export default async function CartPage() {
     reader.fetch(SHOP_SETTINGS_QUERY),
   ])
 
+  const shop = readShopSettings(settings)
+
   return (
     <>
       <h1>Cart</h1>
       {/* The same regions the checkout accepts, without their country lists. */}
       <CartView
         products={readCartProducts(products)}
-        regions={regionOptions(readShopSettings(settings))}
+        regions={regionOptions(shop)}
+        subscriptionDelivery={shop?.subscriptionDelivery ?? 'free'}
         currency={CURRENCY}
       />
     </>

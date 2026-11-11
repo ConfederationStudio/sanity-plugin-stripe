@@ -5,8 +5,10 @@ import {useId, useState} from 'react'
 import {
   cartRows,
   cartSubtotal,
+  describeInterval,
   formatPrice,
   lineKey,
+  shippingQuote,
   useCart,
   useCheckout,
   type CartProduct,
@@ -20,17 +22,22 @@ const REASONS: Record<CheckoutProblem['reason'], string> = {
   noPrice: 'Not on sale right now',
   chooseVariant: 'Choose a version on the product page',
   variantMissing: 'This version is no longer available',
+  noSubscription: 'No longer offered as a subscription',
   tooMany: 'Not that many left',
+  otherInterval: 'One checkout takes subscriptions with the same interval only',
 }
 
 /** The cart, drawn by the site: lines, where to ship, the total and the way to Stripe Checkout. */
 export function CartView({
   products,
   regions,
+  subscriptionDelivery,
   currency,
 }: {
   products: CartProduct[]
   regions: RegionOption[]
+  /** From the shop settings: whether a subscription pays the region's rate with every delivery. */
+  subscriptionDelivery: 'free' | 'rate'
   currency: string
 }) {
   const cart = useCart()
@@ -51,6 +58,21 @@ export function CartView({
   const subtotal = cartSubtotal(rows)
   const blocked = rows.some((row) => !row.status.available)
   const region = regions.find((candidate) => candidate.id === regionId)
+  // The checkout works delivery out again on the server; this is the same sum, for the buyer.
+  // A cart with a subscription pays nothing extra, or the region's rate with every delivery,
+  // which then goes by the lines that repeat.
+  const repeating = rows.reduce(
+    (sum, row) => (row.status.available && row.status.interval ? sum + row.total : sum),
+    0,
+  )
+  const subscribes = rows.some((row) => row.status.available && row.status.interval)
+  const quote = (option: RegionOption) =>
+    subscribes
+      ? subscriptionDelivery === 'rate'
+        ? shippingQuote(option, repeating)
+        : {amount: 0, missing: null}
+      : shippingQuote(option, subtotal)
+  const shipping = region ? quote(region) : null
   const {state} = checkout
   const loading = state.status === 'loading'
   const problems = new Map(
@@ -68,7 +90,10 @@ export function CartView({
               <span className="name">
                 {product?.slug ? <Link href={`/shop/${product.slug}`}>{name}</Link> : name}
                 {status.available ? (
-                  <span>{price(status.price)}</span>
+                  <span>
+                    {price(status.price)}
+                    {status.interval && `, ${describeInterval(status.interval)}`}
+                  </span>
                 ) : (
                   <span className="muted">{REASONS[status.reason]}</span>
                 )}
@@ -127,7 +152,8 @@ export function CartView({
                 checkout.reset()
               }}
             />{' '}
-            {option.title} ({price(option.rate)})
+            {option.title} ({quote(option).amount === 0 ? 'free' : price(quote(option).amount)}
+            {typeof option.freeFrom === 'number' && `, free from ${price(option.freeFrom)}`})
           </label>
         ))}
       </fieldset>
@@ -139,13 +165,31 @@ export function CartView({
         </div>
         <div>
           <dt>Shipping</dt>
-          <dd>{region ? price(region.rate) : <span className="muted">Choose above</span>}</dd>
+          <dd>
+            {shipping ? (
+              shipping.amount === 0 ? (
+                'Free'
+              ) : (
+                price(shipping.amount)
+              )
+            ) : (
+              <span className="muted">Choose above</span>
+            )}
+          </dd>
         </div>
         <div className="total">
-          <dt>Total</dt>
-          <dd>{price(subtotal + (region?.rate ?? 0))}</dd>
+          <dt>{subscribes ? 'Due today' : 'Total'}</dt>
+          <dd>{price(subtotal + (shipping?.amount ?? 0))}</dd>
         </div>
       </dl>
+      {shipping?.missing ? (
+        <p className="muted">{price(shipping.missing)} more for free delivery.</p>
+      ) : null}
+      {subscribes && (
+        <p className="muted">
+          What you subscribe to is charged again with each delivery, until you cancel.
+        </p>
+      )}
       <p className="muted">Prices include VAT. You pay on the next page, with Stripe.</p>
 
       <button

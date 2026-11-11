@@ -10,6 +10,8 @@ export function Header() {
       <Link href="/">Test shop</Link>
       <nav>
         <Link href="/cart">Cart{ready && count > 0 ? ` (${count})` : ''}</Link>
+        {/* A route, not a page: it sends a subscriber on to Stripe's customer portal. */}
+        <a href="/account">Account</a>
         <Link href="/studio">Studio</Link>
       </nav>
     </header>
