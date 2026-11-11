@@ -2,7 +2,7 @@
 
 Until 1.0, a minor version may change the API. Each change that needs work on a site or Studio says what to do.
 
-## 0.1.0 (2026-11-10)
+## 0.1.0 (2026-11-11)
 
 The first release.
 
