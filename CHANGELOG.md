@@ -2,7 +2,7 @@
 
 Until 1.0, a minor version may change the API. Each change that needs work on a site or Studio says what to do.
 
-## Unreleased
+## 0.2.0 (2026-11-11)
 
 Subscriptions, the customer portal, free delivery from an amount and promotion codes. Nothing has to change on a site that sells one-off only.
 

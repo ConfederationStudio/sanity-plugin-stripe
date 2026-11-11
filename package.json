@@ -1,6 +1,6 @@
 {
   "name": "sanity-plugin-stripe",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Sell from a Sanity site with Stripe Checkout: price, stock and variants in the Studio, a cart for React, and checkout and webhook routes for the site.",
   "keywords": [
     "checkout",
