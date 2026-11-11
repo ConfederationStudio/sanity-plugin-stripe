@@ -191,8 +191,12 @@ export interface FakeStripeOptions {
   lineItems?: unknown[]
   /** Fields to change on the renewal invoice, such as `{status: 'open'}`. */
   invoice?: Record<string, unknown>
-  /** The address of the customer portal's login page. Null when it isn't switched on. */
-  portalUrl?: string | null
+  /**
+   * The account's customer portal configurations, each with the address of its login page (null
+   * when the link isn't switched on) and whether it is the Dashboard's default one. None unless
+   * given.
+   */
+  portal?: Array<{url: string | null; isDefault: boolean}>
 }
 
 /**
@@ -264,17 +268,13 @@ export function fakeStripe(options: FakeStripeOptions = {}) {
     if (method === 'GET' && url.pathname === '/v1/billing_portal/configurations')
       return reply(
         list(
-          [
-            {
-              id: 'bpc_test_1',
-              object: 'billing_portal.configuration',
-              is_default: true,
-              login_page: {
-                enabled: Boolean(options.portalUrl),
-                url: options.portalUrl ?? null,
-              },
-            },
-          ],
+          (options.portal ?? []).map((configuration, index) => ({
+            id: `bpc_test_${index + 1}`,
+            object: 'billing_portal.configuration',
+            active: true,
+            is_default: configuration.isDefault,
+            login_page: {enabled: Boolean(configuration.url), url: configuration.url},
+          })),
           url.pathname,
         ),
       )

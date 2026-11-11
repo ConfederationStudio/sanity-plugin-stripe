@@ -576,8 +576,12 @@ export function portalRoute(options: PortalRouteOptions): () => Promise<Response
     if (!stripe) return unavailable('There is no Stripe key. Set one in the environment.')
     if (!link || Date.now() - link.at > PORTAL_LINK_AGE) {
       try {
-        const {data} = await stripe.billingPortal.configurations.list({is_default: true, limit: 1})
-        const url = data[0]?.login_page.url
+        // The Dashboard's own portal settings are the default configuration. A site can also
+        // have made one through the API, which never is the default: either will do.
+        const {data} = await stripe.billingPortal.configurations.list({active: true, limit: 100})
+        const linked = data.filter((configuration) => configuration.login_page.url)
+        const url = (linked.find((configuration) => configuration.is_default) ?? linked[0])
+          ?.login_page.url
         if (!url)
           return unavailable(
             'The customer portal has no login link. Activate it in the Stripe Dashboard: Settings, Billing, Customer portal.',

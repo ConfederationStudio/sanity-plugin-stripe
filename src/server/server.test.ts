@@ -1307,9 +1307,10 @@ describe('webhookRoute with subscriptions', () => {
 
 describe('portalRoute', () => {
   const LOGIN = 'https://billing.stripe.com/p/login/test_abc123'
+  const OTHER = 'https://billing.stripe.com/p/login/test_other456'
 
   it('sends the visitor to the portal’s login page, and asks Stripe for it once', async () => {
-    const {stripe, calls} = fakeStripe({portalUrl: LOGIN})
+    const {stripe, calls} = fakeStripe({portal: [{url: LOGIN, isDefault: true}]})
     const route = portalRoute({stripe, log: quiet})
     const response = await route()
     expect(response.status).toBe(303)
@@ -1318,15 +1319,38 @@ describe('portalRoute', () => {
     await route()
     expect(calls).toHaveLength(1)
     expect(calls[0]?.path).toBe('/v1/billing_portal/configurations')
-    expect(calls[0]?.query.get('is_default')).toBe('true')
+    expect(calls[0]?.query.get('active')).toBe('true')
+  })
+
+  it('goes by the Dashboard’s own portal settings when there are several', async () => {
+    const {stripe} = fakeStripe({
+      portal: [
+        {url: OTHER, isDefault: false},
+        {url: LOGIN, isDefault: true},
+      ],
+    })
+    expect((await portalRoute({stripe, log: quiet})()).headers.get('Location')).toBe(LOGIN)
+  })
+
+  it('takes a portal made through the API when the Dashboard’s has no link', async () => {
+    const {stripe} = fakeStripe({
+      portal: [
+        {url: null, isDefault: true},
+        {url: OTHER, isDefault: false},
+      ],
+    })
+    expect((await portalRoute({stripe, log: quiet})()).headers.get('Location')).toBe(OTHER)
   })
 
   it('answers 503 and says how to switch the login link on', async () => {
     const log = vi.fn()
-    const response = await portalRoute({stripe: fakeStripe().stripe, log})()
+    const {stripe} = fakeStripe({portal: [{url: null, isDefault: true}]})
+    const response = await portalRoute({stripe, log})()
     expect(response.status).toBe(503)
     expect(await response.text()).toBe("The account page isn't available right now.")
     expect(log).toHaveBeenCalledWith('error', expect.stringContaining('Activate it'))
+    // An account that never opened its portal settings has none at all.
+    expect((await portalRoute({stripe: fakeStripe().stripe, log: quiet})()).status).toBe(503)
   })
 
   it('answers 503 before the site has a Stripe key', async () => {
