@@ -15,7 +15,7 @@ Subscriptions, the customer portal, free delivery from an amount and promotion c
 - `Order` gains `subscription` and `invoiceId`, and its items `subscription`. `orderEmail` words a renewal as one and links to its invoice.
 - A webhook endpoint that also receives subscription checkouts made outside the shop still leaves them alone; one made by the shop is now fulfilled, where 0.1 ignored every subscription.
 
-Tried on 11 November 2026 in a Stripe sandbox against the public test dataset: a subscription bought in one cart with a one-off item, its delivery as a repeating line, the order email, stock, the subscription ending, free delivery over the amount, and the code field on Stripe's page. A renewal is tested against a stand-in for Stripe's API only: Stripe's test clocks need a claimed sandbox. Not tried: the portal's login link, a promotion code being used.
+Tried on 11 November 2026 in a Stripe sandbox against the public test dataset: a subscription bought in one cart with a one-off item, its delivery as a repeating line, the order email, stock, and free delivery over the amount. On a Stripe test clock, six weeks on: the renewal lowered stock once and its email went to the address the customer had changed in between; the same event delivered again changed nothing; a renewal whose card was declined fulfilled nothing and reached `onRenewalFailed`, and was fulfilled once it was paid; cancelling reached `onSubscriptionEnded`. A promotion code took 10% off the goods, not the delivery. Not tried: the portal's login link.
 
 ## 0.1.1 (2026-11-11)
 

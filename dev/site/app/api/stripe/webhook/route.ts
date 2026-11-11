@@ -35,6 +35,9 @@ export const POST = webhookRoute({
   stockClient,
   onOrder: printEmail,
   onRenewal: printEmail,
+  onRenewalFailed(invoice) {
+    process.stdout.write(`[subscription] The payment for ${invoice.id} failed.\n`)
+  },
   onSubscriptionEnded(subscription) {
     process.stdout.write(`[subscription] ${subscription.id} ended.\n`)
   },
