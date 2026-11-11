@@ -4,6 +4,7 @@ import {fileURLToPath} from 'node:url'
 
 import {describe, expect, it} from 'vitest'
 
+import {isObject} from './core/guards'
 import {VERSION} from './version'
 
 const SRC = dirname(fileURLToPath(import.meta.url))
@@ -54,9 +55,27 @@ describe('entry points', () => {
   })
 })
 
+function manifest(): Record<string, unknown> {
+  const value: unknown = JSON.parse(readFileSync(resolve(SRC, '../package.json'), 'utf8'))
+  if (!isObject(value)) throw new TypeError('package.json is not an object')
+  return value
+}
+
 describe('the version sent to Stripe', () => {
   it('is the package’s', () => {
-    const manifest: unknown = JSON.parse(readFileSync(resolve(SRC, '../package.json'), 'utf8'))
-    expect(manifest).toMatchObject({version: VERSION})
+    expect(manifest()).toMatchObject({version: VERSION})
+  })
+})
+
+describe('the export map that is published', () => {
+  // The working map has "source" entries for building in this repository. The package holds
+  // `dist` alone, so the map in `publishConfig` is the one that goes out, when pnpm publishes.
+  it('has every entry of the working map, each pointing into dist', () => {
+    const {exports: working, publishConfig} = manifest()
+    const published = isObject(publishConfig) ? publishConfig.exports : undefined
+    if (!isObject(working) || !isObject(published)) throw new TypeError('an export map is missing')
+    expect(Object.keys(published)).toEqual(Object.keys(working))
+    for (const target of Object.values(published))
+      expect(target).toMatch(/^\.\/(?:dist\/[\w-]+\.js|package\.json)$/)
   })
 })
