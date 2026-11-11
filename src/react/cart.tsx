@@ -97,7 +97,7 @@ export function CartProvider({
   return <CartContext.Provider value={value}>{children}</CartContext.Provider>
 }
 
-type LineRef = Pick<CartLine, 'productId' | 'variantKey'>
+type LineRef = Pick<CartLine, 'productId' | 'variantKey' | 'plan'>
 
 export interface Cart {
   lines: CartLine[]
@@ -107,7 +107,10 @@ export interface Cart {
   ready: boolean
   /** Most of one item a buyer can order at once. */
   maxQuantity: number
-  /** Adds to the line for this product and variant. `limit` caps the total, for example at the stock count. */
+  /**
+   * Adds to the line for this product, variant and way of buying (once, or `plan: 'subscribe'`).
+   * `limit` caps the total, for example at the stock count.
+   */
   add: (line: CartLine, limit?: number) => void
   setQuantity: (line: LineRef, quantity: number) => void
   remove: (line: LineRef) => void

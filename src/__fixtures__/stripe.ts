@@ -69,10 +69,130 @@ export const LINE_ITEMS = [
   lineItem('li_2', 'Shirt – M', 1, 2950, {productId: 'shirt', variantKey: 'm'}),
 ]
 
+const list = (data: unknown[], url: string) => ({object: 'list', data, has_more: false, url})
+
+const RECURRING = {interval: 'week', interval_count: 6}
+
+/**
+ * A subscription the test shop's checkout started: a magazine every 6 weeks, and the region's
+ * delivery charge as a line of its own.
+ */
+export const SUBSCRIPTION = {
+  id: 'sub_test_1',
+  object: 'subscription',
+  status: 'active',
+  metadata: {region: 'eu', regionTitle: 'European Union'},
+  items: list(
+    [
+      {
+        id: 'si_1',
+        object: 'subscription_item',
+        quantity: 1,
+        price: {
+          id: 'price_sub_1',
+          object: 'price',
+          recurring: RECURRING,
+          product: {
+            id: 'prod_sub_1',
+            object: 'product',
+            name: 'Issue 16',
+            metadata: {productId: 'magazine'},
+          },
+        },
+      },
+      {
+        id: 'si_2',
+        object: 'subscription_item',
+        quantity: 1,
+        price: {
+          id: 'price_sub_2',
+          object: 'price',
+          recurring: RECURRING,
+          product: {
+            id: 'prod_sub_2',
+            object: 'product',
+            name: 'Delivery: European Union',
+            metadata: {delivery: 'eu'},
+          },
+        },
+      },
+    ],
+    '/v1/subscription_items',
+  ),
+}
+
+const invoiceLine = (id: string, description: string, amount: number, product: string) => ({
+  id,
+  object: 'line_item',
+  description,
+  quantity: 1,
+  amount,
+  pricing: {
+    type: 'price_details',
+    price_details: {price: `price_${product}`, product: `prod_${product}`},
+    unit_amount_decimal: String(amount),
+  },
+})
+
+/** The paid invoice of that subscription's first renewal. The customer has moved since. */
+export const RENEWAL_INVOICE = {
+  id: 'in_test_1',
+  object: 'invoice',
+  status: 'paid',
+  billing_reason: 'subscription_cycle',
+  livemode: false,
+  currency: 'eur',
+  total: 3179,
+  amount_paid: 3179,
+  number: 'SHOP-0002',
+  created: 1797900000,
+  status_transitions: {
+    finalized_at: 1797900000,
+    marked_uncollectible_at: null,
+    paid_at: 1797903600,
+    voided_at: null,
+  },
+  customer_name: 'Ada Lovelace',
+  customer_email: 'ada@example.com',
+  customer_phone: null,
+  customer_shipping: {
+    name: 'Ada Lovelace',
+    address: {
+      line1: 'Engine Lane 2',
+      line2: null,
+      postal_code: '10115',
+      city: 'Berlin',
+      state: null,
+      country: 'DE',
+    },
+  },
+  parent: {
+    type: 'subscription_details',
+    quote_details: null,
+    subscription_details: {subscription: SUBSCRIPTION.id, metadata: SUBSCRIPTION.metadata},
+  },
+  lines: list(
+    [
+      invoiceLine('il_1', '1 × Issue 16 (at €19.79 / every 6 weeks)', 1979, 'sub_1'),
+      invoiceLine(
+        'il_2',
+        '1 × Delivery: European Union (at €12.00 / every 6 weeks)',
+        1200,
+        'sub_2',
+      ),
+    ],
+    '/v1/invoices/in_test_1/lines',
+  ),
+}
+
 export interface FakeStripeOptions {
   /** Fields to change on the session Stripe returns, such as `{payment_status: 'unpaid'}`. */
   session?: Record<string, unknown>
   lineItems?: unknown[]
+  /** Fields to change on the renewal invoice, such as `{status: 'open'}`. */
+  invoice?: Record<string, unknown>
+  /** The address of the customer portal's login page. Null when it isn't switched on. */
+  portalUrl?: string | null
 }
 
 /**
@@ -83,7 +203,21 @@ export function fakeStripe(options: FakeStripeOptions = {}) {
   const calls: StripeCall[] = []
   /** The session's metadata, where finished fulfilment steps are recorded. */
   const metadata: Record<string, string> = {...PAID_SESSION.metadata}
-  const session = {...PAID_SESSION, ...options.session, metadata}
+  const session: Record<string, unknown> & {id: string} = {
+    ...PAID_SESSION,
+    ...options.session,
+    metadata,
+  }
+  /** The invoice's metadata, where a handled renewal is recorded. */
+  const invoiceMetadata: Record<string, string> = {}
+  const invoice = {...RENEWAL_INVOICE, ...options.invoice, metadata: invoiceMetadata}
+  const merge = (into: Record<string, string>, body: URLSearchParams) => {
+    // An update: Stripe merges the metadata it is sent into what the object has.
+    for (const [key, value] of body) {
+      const field = /^metadata\[(.+)\]$/.exec(key)?.[1]
+      if (field) into[field] = value
+    }
+  }
 
   const reply = (data: unknown, status = 200) =>
     new Response(JSON.stringify(data), {
@@ -110,20 +244,42 @@ export function fakeStripe(options: FakeStripeOptions = {}) {
         url: `https://checkout.stripe.com/c/pay/${session.id}`,
       })
     if (url.pathname === `/v1/checkout/sessions/${session.id}`) {
-      // An update: Stripe merges the metadata it is sent into what the session has.
-      for (const [key, value] of body) {
-        const field = /^metadata\[(.+)\]$/.exec(key)?.[1]
-        if (field) metadata[field] = value
-      }
+      merge(metadata, body)
       return reply(session)
     }
+    // The session that started a subscription, as the webhook asks for it.
+    if (method === 'GET' && url.pathname === '/v1/checkout/sessions')
+      return reply(
+        list(
+          session.subscription === url.searchParams.get('subscription') ? [session] : [],
+          url.pathname,
+        ),
+      )
+    if (url.pathname === `/v1/invoices/${invoice.id}`) {
+      merge(invoiceMetadata, body)
+      return reply(invoice)
+    }
+    if (method === 'GET' && url.pathname === `/v1/subscriptions/${SUBSCRIPTION.id}`)
+      return reply(SUBSCRIPTION)
+    if (method === 'GET' && url.pathname === '/v1/billing_portal/configurations')
+      return reply(
+        list(
+          [
+            {
+              id: 'bpc_test_1',
+              object: 'billing_portal.configuration',
+              is_default: true,
+              login_page: {
+                enabled: Boolean(options.portalUrl),
+                url: options.portalUrl ?? null,
+              },
+            },
+          ],
+          url.pathname,
+        ),
+      )
     if (method === 'GET' && url.pathname === `/v1/checkout/sessions/${session.id}/line_items`)
-      return reply({
-        object: 'list',
-        data: options.lineItems ?? LINE_ITEMS,
-        has_more: false,
-        url: url.pathname,
-      })
+      return reply(list(options.lineItems ?? LINE_ITEMS, url.pathname))
     return reply(
       {error: {type: 'invalid_request_error', message: `No route for ${url.pathname}`}},
       404,
@@ -134,7 +290,7 @@ export function fakeStripe(options: FakeStripeOptions = {}) {
     httpClient: Stripe.createFetchHttpClient(fetchFn),
     maxNetworkRetries: 0,
   })
-  return {stripe, calls, metadata}
+  return {stripe, calls, metadata, invoiceMetadata}
 }
 
 export const WEBHOOK_SECRET = 'whsec_test_secret'
@@ -143,14 +299,14 @@ export const WEBHOOK_SECRET = 'whsec_test_secret'
 export function webhookRequest(
   stripe: Stripe,
   type: string,
-  session: Record<string, unknown> = PAID_SESSION,
+  object: Record<string, unknown> = PAID_SESSION,
   secret = WEBHOOK_SECRET,
 ): Request {
   const payload = JSON.stringify({
     id: 'evt_test_1',
     object: 'event',
     type,
-    data: {object: session},
+    data: {object},
   })
   return new Request('https://shop.example/api/stripe/webhook', {
     method: 'POST',

@@ -17,8 +17,8 @@ import {
 import type {ProductStock} from '../core/stock'
 import {buildCheckoutSession} from './checkout'
 import {classifyEvent, verifyEvent} from './events'
-import {once} from './once'
-import {getOrder, type Order} from './order'
+import {once, oncePerInvoice} from './once'
+import {getOrder, getRenewal, type Order} from './order'
 import type {SanityReader, SanityWriter} from './sanity'
 import {decrementStock, readStock, type StockChange} from './stock'
 
@@ -99,7 +99,12 @@ export interface CheckoutRouteOptions {
   hideRemaining?: boolean
   /** Minutes until an unpaid session expires, about 30 at least. Stripe's default is 24 hours. */
   expiresInMinutes?: number
-  /** Changes the session before it is created: promotion codes, phone numbers, consent. */
+  /**
+   * Shows a field for a promotion code on Stripe's page. Codes are made in the Stripe Dashboard,
+   * one per checkout. On a subscription, the code's coupon says whether renewals are discounted.
+   */
+  promotionCodes?: boolean
+  /** Changes the session before it is created: phone numbers, consent, a customer. */
   extend?: (
     params: Stripe.Checkout.SessionCreateParams,
     context: {lines: CartLine[]; region: ShippingRegion; request: Request},
@@ -113,7 +118,9 @@ export interface CheckoutRouteOptions {
 
 /**
  * The site's checkout route. The browser posts the cart's product references and the chosen
- * shipping region; prices, stock and shipping are read fresh from Sanity here.
+ * shipping region; prices, stock and shipping are read fresh from Sanity here. A cart with a
+ * subscription in it becomes a subscription checkout; anything bought once in the same cart is
+ * charged with the first payment.
  *
  * ```ts
  * // app/api/checkout/route.ts
@@ -180,6 +187,10 @@ export function checkoutRoute(options: CheckoutRouteOptions): Handler {
       integrationIdentifier: options.integrationIdentifier,
       ...(stock ? {stock} : {}),
       ...(options.hideRemaining ? {hideRemaining: true} : {}),
+      ...(options.promotionCodes ? {promotionCodes: true} : {}),
+      ...(settings?.subscriptionDelivery
+        ? {subscriptionDelivery: settings.subscriptionDelivery}
+        : {}),
       ...(options.taxRates ? {taxRates: options.taxRates} : {}),
       ...(options.maxQuantity ? {maxQuantity: options.maxQuantity} : {}),
       ...(options.expiresInMinutes
@@ -221,6 +232,11 @@ function absoluteUrl(url: string, origin: string): string {
 
 // Webhook
 
+const subscriptionOf = (invoice: Stripe.Invoice): string | null => {
+  const subscription = invoice.parent?.subscription_details?.subscription
+  return typeof subscription === 'string' ? subscription : (subscription?.id ?? null)
+}
+
 export interface OrderContext {
   /** The shop settings as published. Null before they are published. */
   settings: ShopSettings | null
@@ -231,6 +247,18 @@ export interface OrderContext {
    * Stripe is asked to deliver the event again, and only the stock is tried again.
    */
   stockError?: string
+  /** The Checkout Session that took the order. */
+  session: Stripe.Checkout.Session
+  stripe: Stripe
+}
+
+export interface RenewalContext extends OrderContext {
+  /** The paid invoice. `session` is the Checkout Session that started the subscription. */
+  invoice: Stripe.Invoice
+}
+
+export interface SubscriptionContext {
+  /** The Checkout Session that started the subscription. */
   session: Stripe.Checkout.Session
   stripe: Stripe
 }
@@ -258,14 +286,35 @@ export interface WebhookRouteOptions {
   onOrder?: (order: Order, context: OrderContext) => void | Promise<void>
   /** Called when a delayed payment (a bank transfer, for one) fails. Nothing was fulfilled. */
   onPaymentFailed?: (session: Stripe.Checkout.Session) => void | Promise<void>
+  /**
+   * Called once for each paid renewal of a subscription, after stock is lowered: there is a
+   * parcel to send again. The order's address is the customer's as it is now. The first payment
+   * of a subscription is not a renewal: it reaches `onOrder`.
+   */
+  onRenewal?: (order: Order, context: RenewalContext) => void | Promise<void>
+  /**
+   * Called when a renewal's payment fails. Stripe tries again and writes to the customer by
+   * itself, so there is nothing that has to be done here. It can be called more than once.
+   */
+  onRenewalFailed?: (invoice: Stripe.Invoice, context: SubscriptionContext) => void | Promise<void>
+  /** Called when a subscription ends: cancelled, or given up on after failed payments. */
+  onSubscriptionEnded?: (
+    subscription: Stripe.Subscription,
+    context: SubscriptionContext,
+  ) => void | Promise<void>
+  /**
+   * Called for every other event the endpoint receives, once its signature is checked: a
+   * dispute, a refund. These are not sorted by shop: they are the Stripe account's.
+   */
+  onEvent?: (event: Stripe.Event, context: {stripe: Stripe}) => void | Promise<void>
   log?: Log
 }
 
 /**
  * The site's Stripe webhook. A paid order of this shop lowers stock and calls `onOrder`, each
- * once per payment however often Stripe delivers the event. Payments made any other way on the
- * same Stripe account (a Payment Link, another site) are left alone. Nothing is fulfilled on the
- * thank-you page.
+ * once per payment however often Stripe delivers the event. A paid renewal of a subscription
+ * does the same and calls `onRenewal`. Payments made any other way on the same Stripe account (a
+ * Payment Link, another site) are left alone. Nothing is fulfilled on the thank-you page.
  *
  * ```ts
  * // app/api/stripe/webhook/route.ts
@@ -287,9 +336,45 @@ export function webhookRoute(options: WebhookRouteOptions): Handler {
   const ownSession = async (stripe: Stripe, sessionId: string) => {
     const session = await stripe.checkout.sessions.retrieve(sessionId)
     const own =
-      session.mode === 'payment' && session.integration_identifier === options.integrationIdentifier
+      session.mode !== 'setup' && session.integration_identifier === options.integrationIdentifier
     if (!own) log('info', `[stripe webhook] ${sessionId}: not one of this shop's, left alone.`)
     return own ? session : null
+  }
+
+  /** Lowers stock for a paid order or renewal, once per `id`: a session's or an invoice's. */
+  const lowerStock = async (id: string, order: Order, settings: ShopSettings | null) => {
+    if (!options.stockClient) {
+      if (!saidUncounted) {
+        saidUncounted = true
+        log('info', '[stripe webhook] No stockClient: stock counts are left as they are.')
+      }
+      return {stock: []}
+    }
+    try {
+      const result = await decrementStock(
+        options.stockClient,
+        {sessionId: id, items: order.items},
+        {
+          autoSoldOut: settings?.autoSoldOut ?? true,
+          ...(options.products ? {products: options.products} : {}),
+        },
+      )
+      if (result.status === 'lowered') {
+        const summary = result.changes
+          .map(
+            ({productId, variantKey, from, to}) =>
+              `${productId}${variantKey ? ` ${variantKey}` : ''} ${from} → ${to}`,
+          )
+          .join(', ')
+        log('info', `[stripe webhook] ${id}: stock ${summary}`)
+      }
+      return {stock: result.changes}
+    } catch (error) {
+      // The order still has to reach the shop. It is told, and Stripe is asked to come back.
+      const stockError = reason(error)
+      log('error', `[stripe webhook] ${id}: stock was not lowered: ${stockError}`)
+      return {stock: [], stockError}
+    }
   }
 
   const fulfil = async (stripe: Stripe, sessionId: string) => {
@@ -305,34 +390,7 @@ export function webhookRoute(options: WebhookRouteOptions): Handler {
       client.fetch(SHOP_SETTINGS_QUERY),
     ])
     const settings = readShopSettings(foundSettings)
-
-    let stock: StockChange[] = []
-    let stockError: string | undefined
-    if (options.stockClient) {
-      try {
-        const result = await decrementStock(options.stockClient, order, {
-          autoSoldOut: settings?.autoSoldOut ?? true,
-          ...(options.products ? {products: options.products} : {}),
-        })
-        stock = result.changes
-        if (result.status === 'lowered') {
-          const summary = stock
-            .map(
-              ({productId, variantKey, from, to}) =>
-                `${productId}${variantKey ? ` ${variantKey}` : ''} ${from} → ${to}`,
-            )
-            .join(', ')
-          log('info', `[stripe webhook] ${sessionId}: stock ${summary}`)
-        }
-      } catch (error) {
-        // The order still has to reach the shop. It is told, and Stripe is asked to come back.
-        stockError = reason(error)
-        log('error', `[stripe webhook] ${sessionId}: stock was not lowered: ${stockError}`)
-      }
-    } else if (!saidUncounted) {
-      saidUncounted = true
-      log('info', '[stripe webhook] No stockClient: stock counts are left as they are.')
-    }
+    const {stock, stockError} = await lowerStock(sessionId, order, settings)
 
     const {onOrder} = options
     if (onOrder) {
@@ -346,6 +404,56 @@ export function webhookRoute(options: WebhookRouteOptions): Handler {
         })
       })
       log('info', `[stripe webhook] ${sessionId}: order ${outcome}.`)
+    }
+
+    if (stockError) throw new Error(`Stock was not lowered: ${stockError}`)
+  }
+
+  /**
+   * The Checkout Session that started a subscription, or null when the subscription isn't this
+   * shop's. It is looked up in Stripe, not taken from a label on the invoice.
+   */
+  const startedBy = async (stripe: Stripe, subscriptionId: string) => {
+    const {data} = await stripe.checkout.sessions.list({subscription: subscriptionId, limit: 1})
+    const session = data[0]
+    const own = session?.integration_identifier === options.integrationIdentifier
+    if (!own) log('info', `[stripe webhook] ${subscriptionId}: not one of this shop's, left alone.`)
+    return own ? session : null
+  }
+
+  const renew = async (stripe: Stripe, invoiceId: string) => {
+    // Read again: as this client's API version shapes it, and with the status it has now.
+    const invoice = await stripe.invoices.retrieve(invoiceId)
+    const subscriptionId = subscriptionOf(invoice)
+    // A subscription's first invoice is the order the checkout's own event fulfils.
+    if (!subscriptionId || invoice.billing_reason !== 'subscription_cycle') return
+    const session = await startedBy(stripe, subscriptionId)
+    if (!session) return
+    if (invoice.status !== 'paid') {
+      log('info', `[stripe webhook] ${invoiceId}: not paid yet.`)
+      return
+    }
+    const [order, foundSettings] = await Promise.all([
+      getRenewal(stripe, invoice, session, subscriptionId),
+      client.fetch(SHOP_SETTINGS_QUERY),
+    ])
+    const settings = readShopSettings(foundSettings)
+    // The renewal is paid already, so it can take a count below 0: `onRenewal` is told.
+    const {stock, stockError} = await lowerStock(invoiceId, order, settings)
+
+    const {onRenewal} = options
+    if (onRenewal) {
+      const outcome = await oncePerInvoice(stripe, invoice, 'renewal', async () => {
+        await onRenewal(order, {
+          settings,
+          stock,
+          ...(stockError ? {stockError} : {}),
+          session,
+          invoice,
+          stripe,
+        })
+      })
+      log('info', `[stripe webhook] ${invoiceId}: renewal ${outcome}.`)
     }
 
     if (stockError) throw new Error(`Stock was not lowered: ${stockError}`)
@@ -385,7 +493,34 @@ export function webhookRoute(options: WebhookRouteOptions): Handler {
           }
           break
         }
+        case 'invoicePaid':
+          await renew(stripe, result.invoice.id)
+          break
+        case 'invoiceFailed': {
+          const {onRenewalFailed} = options
+          if (!onRenewalFailed) break
+          const invoice = await stripe.invoices.retrieve(result.invoice.id)
+          const subscriptionId = subscriptionOf(invoice)
+          const session = subscriptionId ? await startedBy(stripe, subscriptionId) : null
+          if (session) {
+            log('warn', `[stripe webhook] ${invoice.id}: a renewal's payment failed.`)
+            await onRenewalFailed(invoice, {session, stripe})
+          }
+          break
+        }
+        case 'subscriptionEnded': {
+          const {onSubscriptionEnded} = options
+          if (!onSubscriptionEnded) break
+          const session = await startedBy(stripe, result.subscription.id)
+          if (session) {
+            const subscription = await stripe.subscriptions.retrieve(result.subscription.id)
+            log('info', `[stripe webhook] ${subscription.id}: the subscription ended.`)
+            await onSubscriptionEnded(subscription, {session, stripe})
+          }
+          break
+        }
         case 'ignored':
+          await options.onEvent?.(event, {stripe})
           break
       }
     } catch (error) {
@@ -395,5 +530,66 @@ export function webhookRoute(options: WebhookRouteOptions): Handler {
     }
 
     return json({received: true})
+  }
+}
+
+// Customer portal
+
+export interface PortalRouteOptions {
+  /** From `createStripe`. */
+  stripe: Stripe | null | undefined
+  /** What a visitor reads when the portal can't be opened. */
+  message?: string
+  log?: Log
+}
+
+/** How long the portal's address is kept before Stripe is asked for it again. */
+const PORTAL_LINK_AGE = 5 * 60 * 1000
+
+/**
+ * Sends a visitor to Stripe's customer portal, where a subscriber changes their card or address,
+ * pauses or cancels, and finds their invoices. There are no accounts to build: the visitor types
+ * their email on Stripe's page and Stripe emails them a link in.
+ *
+ * ```ts
+ * // app/account/route.ts
+ * export const GET = portalRoute({stripe})
+ * ```
+ *
+ * Switch the portal's login link on once, in the Stripe Dashboard under Settings, Billing,
+ * Customer portal, and choose there what subscribers may change.
+ */
+export function portalRoute(options: PortalRouteOptions): () => Promise<Response> {
+  const {log = consoleLog} = options
+  let link: {url: string; at: number} | undefined
+
+  const unavailable = (detail: string) => {
+    log('error', `[portal] ${detail}`)
+    return new Response(options.message ?? "The account page isn't available right now.", {
+      status: 503,
+      headers: {'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store'},
+    })
+  }
+
+  return async () => {
+    const {stripe} = options
+    if (!stripe) return unavailable('There is no Stripe key. Set one in the environment.')
+    if (!link || Date.now() - link.at > PORTAL_LINK_AGE) {
+      try {
+        const {data} = await stripe.billingPortal.configurations.list({is_default: true, limit: 1})
+        const url = data[0]?.login_page.url
+        if (!url)
+          return unavailable(
+            'The customer portal has no login link. Activate it in the Stripe Dashboard: Settings, Billing, Customer portal.',
+          )
+        link = {url, at: Date.now()}
+      } catch (error) {
+        return unavailable(`Stripe could not be asked for the portal's address: ${reason(error)}`)
+      }
+    }
+    return new Response(null, {
+      status: 303,
+      headers: {'Location': link.url, 'Cache-Control': 'no-store'},
+    })
   }
 }

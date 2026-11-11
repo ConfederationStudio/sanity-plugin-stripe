@@ -1,5 +1,6 @@
 import type Stripe from 'stripe'
 
+import {describeInterval} from '../core/cart'
 import {formatMoney} from '../core/money'
 import type {Order} from './order'
 import type {StockChange} from './stock'
@@ -18,11 +19,13 @@ function addressLines(name: string | null, address: Stripe.Address | null): stri
   )
 }
 
-/** Where the payment is in the Stripe Dashboard. */
+/** Where the payment is in the Stripe Dashboard: a renewal's invoice, a subscription, a payment. */
 export function dashboardUrl(
-  order: Pick<Order, 'livemode' | 'paymentIntentId' | 'sessionId'>,
+  order: Pick<Order, 'livemode' | 'paymentIntentId' | 'sessionId' | 'invoiceId' | 'subscription'>,
 ): string {
   const base = `https://dashboard.stripe.com/${order.livemode ? '' : 'test/'}`
+  if (order.invoiceId) return `${base}invoices/${order.invoiceId}`
+  if (order.subscription) return `${base}subscriptions/${order.subscription.id}`
   return order.paymentIntentId
     ? `${base}payments/${order.paymentIntentId}`
     : `${base}checkout/sessions/${order.sessionId}`
@@ -45,13 +48,24 @@ export interface OrderEmail {
   html: string
 }
 
-/** A plain order email for the shop: what to pack, where to send it and who paid. */
+/**
+ * A plain order email for the shop: what to pack, where to send it and who paid. It serves a
+ * subscription's renewal too, from `onRenewal`.
+ */
 export function orderEmail(order: Order, options: OrderEmailOptions): OrderEmail {
   const {shopName, locale = 'en', stock = [], stockError} = options
   const money = (minor: number) => formatMoney(minor, order.currency, locale)
   const count = order.items.reduce((sum, item) => sum + item.quantity, 0)
   const who = order.shipping.name ?? order.customer.name ?? order.customer.email ?? 'a customer'
-  const subject = `${order.livemode ? '' : '[Test] '}${shopName} order from ${who}: ${count} ${count === 1 ? 'item' : 'items'}, ${money(order.amountTotal)}`
+  const renewal = Boolean(order.invoiceId)
+  const subject = `${order.livemode ? '' : '[Test] '}${shopName} ${renewal ? 'renewal for' : 'order from'} ${who}: ${count} ${count === 1 ? 'item' : 'items'}, ${money(order.amountTotal)}`
+  const heading = renewal ? 'Subscription renewal' : 'New order'
+  const repeats = order.subscription?.interval
+    ? `subscription, ${describeInterval(order.subscription.interval)}`
+    : 'subscription'
+  // On a renewal every line repeats, so only a first order says which lines do.
+  const nameOf = (item: Order['items'][number]) =>
+    item.subscription && !renewal ? `${item.name} (${repeats})` : item.name
   const address = addressLines(order.shipping.name, order.shipping.address)
   const contact = [order.customer.email, order.customer.phone].filter((line): line is string =>
     Boolean(line),
@@ -80,10 +94,10 @@ export function orderEmail(order: Order, options: OrderEmailOptions): OrderEmail
   ]
 
   const text = [
-    `New order on ${date}${order.livemode ? '' : ' (test mode, no money moved)'}`,
+    `${heading} on ${date}${order.livemode ? '' : ' (test mode, no money moved)'}`,
     '',
     ...warnings.flatMap((warning) => [warning, '']),
-    ...order.items.map((item) => `${item.quantity} × ${item.name}  ${money(item.amountTotal)}`),
+    ...order.items.map((item) => `${item.quantity} × ${nameOf(item)}  ${money(item.amountTotal)}`),
     `${shippingLabel}  ${money(order.amountShipping)}`,
     `Total  ${money(order.amountTotal)}`,
     '',
@@ -99,11 +113,11 @@ export function orderEmail(order: Order, options: OrderEmailOptions): OrderEmail
   const rows = order.items
     .map(
       (item) =>
-        `<tr><td style="padding:4px 12px 4px 0">${item.quantity} ×</td><td style="padding:4px 12px 4px 0">${escapeHtml(item.name)}</td><td style="padding:4px 0;text-align:right">${money(item.amountTotal)}</td></tr>`,
+        `<tr><td style="padding:4px 12px 4px 0">${item.quantity} ×</td><td style="padding:4px 12px 4px 0">${escapeHtml(nameOf(item))}</td><td style="padding:4px 0;text-align:right">${money(item.amountTotal)}</td></tr>`,
     )
     .join('')
   const html = `<div style="font-family:Helvetica,Arial,sans-serif;font-size:15px;line-height:1.45;color:#191919">
-<p>New order on ${date}${order.livemode ? '' : ' <strong>(test mode, no money moved)</strong>'}</p>
+<p>${heading} on ${date}${order.livemode ? '' : ' <strong>(test mode, no money moved)</strong>'}</p>
 ${warnings.map((warning) => `<p><strong>${escapeHtml(warning)}</strong></p>\n`).join('')}<table style="border-collapse:collapse">${rows}
 <tr><td></td><td style="padding:4px 12px 4px 0">${escapeHtml(shippingLabel)}</td><td style="padding:4px 0;text-align:right">${money(order.amountShipping)}</td></tr>
 <tr><td></td><td style="padding:4px 12px 4px 0"><strong>Total</strong></td><td style="padding:4px 0;text-align:right"><strong>${money(order.amountTotal)}</strong></td></tr>

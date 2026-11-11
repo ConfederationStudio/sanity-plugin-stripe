@@ -5,7 +5,7 @@ import {EU_COUNTRIES} from '../core/countries'
 import {COMMERCE_TYPE, SHOP_SETTINGS_TYPE, stockId} from '../core/ids'
 import {moneyTitle, resolveConfig} from './config'
 import {settingsActions, withoutSettingsTemplate} from './plugin'
-import {createCommerceType, createVariantType} from './schema/commerce'
+import {createCommerceType, createSubscriptionType, createVariantType} from './schema/commerce'
 import {
   countCountries,
   createShippingRegionType,
@@ -50,12 +50,18 @@ describe('the price-and-stock field', () => {
   it('has a tax class only when the shop has tax classes', () => {
     const plain = createCommerceType(resolveConfig({currency: 'eur'}))
     expect(plain.name).toBe(COMMERCE_TYPE)
-    expect(fieldNames(plain)).toEqual(['availability', 'price', 'variants'])
+    expect(fieldNames(plain)).toEqual(['availability', 'price', 'subscription', 'variants'])
 
     const taxed = createCommerceType(
       resolveConfig({currency: 'eur', tax: {label: 'VAT', classes: VAT}}),
     )
-    expect(fieldNames(taxed)).toEqual(['availability', 'price', 'taxClass', 'variants'])
+    expect(fieldNames(taxed)).toEqual([
+      'availability',
+      'price',
+      'taxClass',
+      'subscription',
+      'variants',
+    ])
     expect(field(taxed, 'taxClass')).toMatchObject({
       title: 'VAT',
       initialValue: 'reduced',
@@ -75,6 +81,7 @@ describe('what the plugin puts in public documents', () => {
   const types = [
     createCommerceType(config),
     createVariantType(),
+    createSubscriptionType(config),
     createShippingRegionType(config),
     createShopSettingsType(config),
   ]
@@ -86,13 +93,20 @@ describe('what the plugin puts in public documents', () => {
       'availability',
       'availability',
       'countries',
+      'enabled',
+      'every',
       'everywhereElse',
+      'freeFrom',
       'label',
+      'price',
       'price',
       'rate',
       'shippingRegions',
+      'subscription',
+      'subscriptionDelivery',
       'taxClass',
       'title',
+      'unit',
       'variants',
     ])
   })
@@ -250,5 +264,67 @@ describe('stock boxes', () => {
       .commit()
     await saveStock(writer, 'shirt', seen, {variantKey: 'l', count: 4})
     expect(dataset.value(stockId('shirt'), 'variants[_key=="m"].stockCount')).toBe(0)
+  })
+})
+
+describe('the subscription a product offers', () => {
+  const config = resolveConfig({currency: 'gbp', tax: {label: 'VAT'}})
+
+  it('asks for a price, how often, and weeks or months', () => {
+    const subscription = createSubscriptionType(config)
+    expect(fieldNames(subscription)).toEqual(['enabled', 'price', 'every', 'unit'])
+    expect(field(subscription, 'enabled')).toMatchObject({type: 'boolean', initialValue: false})
+    expect(field(subscription, 'price')).toMatchObject({
+      title: 'Price per delivery (GBP, including VAT)',
+    })
+    expect(field(subscription, 'unit')).toMatchObject({
+      initialValue: 'week',
+      options: {
+        list: [
+          {title: 'Weeks', value: 'week'},
+          {title: 'Months', value: 'month'},
+        ],
+      },
+    })
+  })
+
+  it('sits on the price-and-stock field, off until an editor switches it on', () => {
+    const commerce = createCommerceType(config)
+    expect(field(commerce, 'subscription')).toMatchObject({
+      title: 'Subscribe and save',
+      type: 'stripeSubscription',
+    })
+  })
+})
+
+describe('delivery in the shop settings', () => {
+  const config = resolveConfig({
+    currency: 'gbp',
+    shop: {
+      shippingRegions: [{title: 'United Kingdom', countries: ['GB'], rate: 3.95, freeFrom: 25}],
+    },
+  })
+
+  it('lets a region be free from an amount, also as a starting value', () => {
+    expect(field(createShippingRegionType(config), 'freeFrom')).toMatchObject({
+      title: 'Free from (GBP)',
+      type: 'number',
+    })
+    expect(initialRegions(config)).toMatchObject([
+      {title: 'United Kingdom', rate: 3.95, freeFrom: 25},
+    ])
+  })
+
+  it('asks how subscriptions pay for delivery, free unless the shop says otherwise', () => {
+    expect(field(createShopSettingsType(config), 'subscriptionDelivery')).toMatchObject({
+      title: 'Delivery for subscriptions',
+      initialValue: 'free',
+      options: {
+        list: [
+          {title: 'Free: delivery is in the subscription price', value: 'free'},
+          {title: 'The region’s rate with every delivery', value: 'rate'},
+        ],
+      },
+    })
   })
 })

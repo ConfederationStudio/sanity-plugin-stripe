@@ -4,13 +4,31 @@ import {asArray, isObject} from './guards'
 
 export type Availability = 'onSale' | 'soldOut'
 
+/** How often a subscription is delivered and charged. */
+export interface Interval {
+  unit: 'week' | 'month'
+  /** 6 with `week` means every 6 weeks. */
+  every: number
+}
+
 /** What the browser keeps in the cart: references only, never prices. */
 export interface CartLine {
   /** Sanity document id of the product. */
   productId: string
   /** `_key` of the chosen variant, when the product has variants. */
   variantKey?: string
+  /** Set when the buyer subscribes. Left out when the product is bought once. */
+  plan?: 'subscribe'
   quantity: number
+}
+
+/** The subscription a product offers, as the Studio saves it. */
+export interface CartSubscription {
+  enabled?: boolean | null
+  /** Per delivery, in currency units. */
+  price?: number | null
+  every?: number | null
+  unit?: string | null
 }
 
 export interface CartVariant {
@@ -34,7 +52,31 @@ export interface CartProduct {
     price?: number | null
     taxClass?: string | null
     variants?: CartVariant[] | null
+    subscription?: CartSubscription | null
   } | null
+}
+
+/** Stripe charges a subscription at least once every three years. */
+const LONGEST: Record<Interval['unit'], number> = {week: 156, month: 36}
+
+/** The subscription a product offers, when it is switched on and filled in. Null otherwise. */
+export function readSubscription(
+  subscription: CartSubscription | null | undefined,
+): {price: number; interval: Interval} | null {
+  if (!subscription?.enabled) return null
+  const {price, every, unit} = subscription
+  if (typeof price !== 'number' || !Number.isFinite(price) || price < 0) return null
+  if (unit !== 'week' && unit !== 'month') return null
+  if (typeof every !== 'number' || !Number.isInteger(every) || every < 1 || every > LONGEST[unit])
+    return null
+  return {price, interval: {unit, every}}
+}
+
+/** "every 6 weeks", "every month": how an interval reads in English. */
+export function describeInterval(interval: Interval): string {
+  return interval.every === 1
+    ? `every ${interval.unit}`
+    : `every ${interval.every} ${interval.unit}s`
 }
 
 /**
@@ -50,9 +92,9 @@ export function readCartProducts(value: unknown): CartProduct[] {
 /** Most of one item a buyer can order at once. */
 export const MAX_QUANTITY = 10
 
-/** One cart line per product and variant. */
-export function lineKey(line: Pick<CartLine, 'productId' | 'variantKey'>): string {
-  return `${line.productId}:${line.variantKey ?? ''}`
+/** One cart line per product, variant and way of buying. */
+export function lineKey(line: Pick<CartLine, 'productId' | 'variantKey' | 'plan'>): string {
+  return `${line.productId}:${line.variantKey ?? ''}${line.plan ? `:${line.plan}` : ''}`
 }
 
 /**
@@ -66,13 +108,18 @@ export function sanitizeLines(input: unknown, max = MAX_QUANTITY): CartLine[] {
   const merged = new Map<string, CartLine>()
   for (const item of asArray(input).slice(0, 100)) {
     if (!isObject(item)) continue
-    const {productId, variantKey, quantity} = item
+    const {productId, variantKey, plan, quantity} = item
     if (typeof productId !== 'string' || !productId || productId.length > 200) continue
     if (productId.includes('.')) continue
     if (variantKey !== undefined && (typeof variantKey !== 'string' || variantKey.length > 200))
       continue
     if (typeof quantity !== 'number' || !Number.isFinite(quantity)) continue
-    const line: CartLine = {productId, quantity: 0, ...(variantKey ? {variantKey} : {})}
+    const line: CartLine = {
+      productId,
+      quantity: 0,
+      ...(variantKey ? {variantKey} : {}),
+      ...(plan === 'subscribe' ? {plan} : {}),
+    }
     const key = lineKey(line)
     const existing = merged.get(key)
     const total = (existing?.quantity ?? 0) + Math.floor(quantity)
@@ -82,10 +129,25 @@ export function sanitizeLines(input: unknown, max = MAX_QUANTITY): CartLine[] {
   return [...merged.values()]
 }
 
-export type Unavailable = 'missing' | 'soldOut' | 'noPrice' | 'chooseVariant' | 'variantMissing'
+export type Unavailable =
+  | 'missing'
+  | 'soldOut'
+  | 'noPrice'
+  | 'chooseVariant'
+  | 'variantMissing'
+  /** The line subscribes, and the product doesn't offer a subscription (any more). */
+  | 'noSubscription'
 
 export type LineStatus =
-  | {available: true; maxQuantity: number; price: number; variant?: CartVariant}
+  | {
+      available: true
+      maxQuantity: number
+      /** Once, or per delivery when `interval` is set. */
+      price: number
+      variant?: CartVariant
+      /** Set when the line is a subscription. */
+      interval?: Interval
+    }
   | {available: false; reason: Unavailable}
 
 /**
@@ -96,11 +158,15 @@ export function lineStatus(
   product: CartProduct | undefined,
   variantKey?: string,
   max = MAX_QUANTITY,
+  plan?: CartLine['plan'],
 ): LineStatus {
   const commerce = product?.commerce
   if (!product || !commerce) return {available: false, reason: 'missing'}
   if (commerce.availability === 'soldOut') return {available: false, reason: 'soldOut'}
-  if (typeof commerce.price !== 'number') return {available: false, reason: 'noPrice'}
+  const subscription = plan === 'subscribe' ? readSubscription(commerce.subscription) : null
+  if (plan === 'subscribe' && !subscription) return {available: false, reason: 'noSubscription'}
+  const price = subscription ? subscription.price : commerce.price
+  if (typeof price !== 'number') return {available: false, reason: 'noPrice'}
 
   const variants = commerce.variants ?? []
   let variant: CartVariant | undefined
@@ -113,7 +179,13 @@ export function lineStatus(
     return {available: false, reason: 'variantMissing'}
   }
 
-  return {available: true, maxQuantity: max, price: commerce.price, variant}
+  return {
+    available: true,
+    maxQuantity: max,
+    price,
+    variant,
+    ...(subscription ? {interval: subscription.interval} : {}),
+  }
 }
 
 /** Display name for a line: the product title, plus the variant label when there is one. */
@@ -129,8 +201,13 @@ export function lineName(
 export interface CheckoutProblem {
   productId: string
   variantKey?: string
+  plan?: 'subscribe'
   name?: string
-  reason: Unavailable | 'tooMany'
+  /**
+   * `otherInterval`: the cart holds subscriptions that repeat at different intervals, and one
+   * checkout takes one interval.
+   */
+  reason: Unavailable | 'tooMany' | 'otherInterval'
   /** For `tooMany`: how many can be ordered. Left out when the shop hides what is left. */
   maxQuantity?: number
 }
@@ -164,7 +241,7 @@ export function cartRows(
   const byId = new Map(products.map((product) => [product._id, product]))
   return lines.map((line) => {
     const product = byId.get(line.productId)
-    const status = lineStatus(product, line.variantKey, max)
+    const status = lineStatus(product, line.variantKey, max, line.plan)
     const name = product ? lineName(product, status.available ? status.variant : undefined) : 'Item'
     const quantity = status.available ? Math.min(line.quantity, status.maxQuantity) : 0
     const total = status.available ? status.price * quantity : 0

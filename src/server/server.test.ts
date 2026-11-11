@@ -4,12 +4,14 @@ import {fakeDataset, SHOP, type Doc} from '../__fixtures__/sanity'
 import {
   fakeStripe,
   PAID_SESSION,
+  RENEWAL_INVOICE,
   SHOP_TAG,
+  SUBSCRIPTION,
   WEBHOOK_SECRET,
   webhookRequest,
 } from '../__fixtures__/stripe'
-import {readCartProducts} from '../core/cart'
-import {STOCK_CHANGE_TYPE, stockChangeId, stockId} from '../core/ids'
+import {readCartProducts, type CartProduct} from '../core/cart'
+import {SHOP_SETTINGS_ID, STOCK_CHANGE_TYPE, stockChangeId, stockId} from '../core/ids'
 import {checkoutProductsQuery, SHOP_SETTINGS_QUERY} from '../core/queries'
 import {readShopSettings, regionsFromSettings} from '../core/regions'
 import {VERSION} from '../version'
@@ -17,7 +19,13 @@ import {buildCheckoutSession} from './checkout'
 import {orderEmail} from './email'
 import {classifyEvent, verifyEvent} from './events'
 import {getOrder, type Order} from './order'
-import {checkoutRoute, webhookRoute, type OrderContext} from './routes'
+import {
+  checkoutRoute,
+  portalRoute,
+  webhookRoute,
+  type OrderContext,
+  type RenewalContext,
+} from './routes'
 import {decrementStock, readStock} from './stock'
 import {STRIPE_API_VERSION} from './stripe'
 
@@ -648,7 +656,7 @@ describe('webhookRoute', () => {
   it.each([
     ['a Payment Link, which carries no mark', {integration_identifier: null}],
     ['another site on the account', {integration_identifier: 'othershop_zyxwvuts'}],
-    ['a subscription', {mode: 'subscription'}],
+    ['a subscription sold elsewhere', {mode: 'subscription', integration_identifier: null}],
   ])('leaves alone a payment made any other way: %s', async (_, session) => {
     const {deliver, dataset, onOrder, metadata} = setup({session})
     expect((await deliver()).status).toBe(200)
@@ -817,5 +825,555 @@ describe('orderEmail', () => {
       'Stock counts were not lowered for this order. Change them by hand.',
     )
     expect(email.html).toContain('Insufficient &lt;permissions&gt;')
+  })
+})
+
+/** A product that can be bought once or subscribed to, as koskn sells its sun cream. */
+const SERUM: CartProduct = {
+  _id: 'serum',
+  title: 'Serum',
+  commerce: {
+    availability: 'onSale',
+    price: 21.99,
+    subscription: {enabled: true, price: 19.79, every: 6, unit: 'week'},
+  },
+}
+const TONIC: CartProduct = {
+  _id: 'tonic',
+  title: 'Tonic',
+  commerce: {
+    availability: 'onSale',
+    price: 10,
+    subscription: {enabled: true, price: 9, every: 1, unit: 'month'},
+  },
+}
+const subscribed = {productId: 'serum', plan: 'subscribe', quantity: 1}
+const EVERY_6_WEEKS = {interval: 'week', interval_count: 6}
+
+type Input = Parameters<typeof buildCheckoutSession>[0]
+
+/** The test shop with the two products above, and the EU region free from an amount when given. */
+async function subscriptionInput(lines: unknown, extra: Partial<Input> = {}, freeFrom?: number) {
+  const input = await shopInput()
+  return buildCheckoutSession({
+    ...input,
+    products: [...input.products, SERUM, TONIC],
+    regions: input.regions.map((region) =>
+      region.id === 'eu' && freeFrom !== undefined ? Object.assign({}, region, {freeFrom}) : region,
+    ),
+    lines,
+    ...extra,
+  })
+}
+
+const paramsOf = (result: ReturnType<typeof buildCheckoutSession>) => {
+  if (!result.ok) throw new Error(`The checkout was refused: ${result.error}`)
+  return result.params
+}
+const shippingOf = (result: ReturnType<typeof buildCheckoutSession>) =>
+  paramsOf(result).shipping_options?.[0]?.shipping_rate_data?.fixed_amount?.amount
+
+describe('free delivery from an amount', () => {
+  it('charges the region’s rate below the amount', async () => {
+    expect(
+      shippingOf(await subscriptionInput([{productId: 'magazine', quantity: 1}], {}, 50)),
+    ).toBe(1200)
+  })
+
+  it('charges nothing from the amount up', async () => {
+    // Two magazines at €25 are €50 exactly.
+    expect(
+      shippingOf(await subscriptionInput([{productId: 'magazine', quantity: 2}], {}, 50)),
+    ).toBe(0)
+  })
+
+  it('changes nothing for a region without an amount', async () => {
+    expect(shippingOf(await subscriptionInput([{productId: 'magazine', quantity: 2}]))).toBe(1200)
+  })
+})
+
+describe('a subscription at checkout', () => {
+  it('becomes a subscription checkout, priced per delivery', async () => {
+    const params = paramsOf(await subscriptionInput([subscribed]))
+    expect(params.mode).toBe('subscription')
+    expect(params.line_items).toEqual([
+      {
+        quantity: 1,
+        price_data: {
+          currency: 'eur',
+          unit_amount: 1979,
+          recurring: EVERY_6_WEEKS,
+          product_data: {name: 'Serum', metadata: {productId: 'serum'}},
+        },
+      },
+    ])
+    // Stripe has no shipping options for a subscription: by default delivery is in the price.
+    expect(params).not.toHaveProperty('shipping_options')
+    expect(params.shipping_address_collection?.allowed_countries).toEqual(['DE', 'FR'])
+    expect(params.subscription_data).toEqual({
+      metadata: {region: 'eu', regionTitle: 'European Union'},
+    })
+    expect(params.integration_identifier).toBe(SHOP_TAG)
+    expect(params).not.toHaveProperty('payment_method_types')
+  })
+
+  it('charges what is bought once with the first payment', async () => {
+    const params = paramsOf(
+      await subscriptionInput([subscribed, {productId: 'serum', quantity: 2}]),
+    )
+    expect(params.mode).toBe('subscription')
+    expect(params.line_items?.map((item) => item.price_data)).toMatchObject([
+      {unit_amount: 1979, recurring: EVERY_6_WEEKS},
+      {unit_amount: 2199},
+    ])
+    expect(params.line_items?.[1]?.price_data).not.toHaveProperty('recurring')
+  })
+
+  it('stays a one-off checkout without a subscription in the cart', async () => {
+    const params = paramsOf(await subscriptionInput([{productId: 'serum', quantity: 1}]))
+    expect(params.mode).toBe('payment')
+    expect(params).not.toHaveProperty('subscription_data')
+    expect(shippingOf(await subscriptionInput([{productId: 'serum', quantity: 1}]))).toBe(1200)
+  })
+
+  it('charges delivery with every parcel when the shop says so', async () => {
+    const params = paramsOf(await subscriptionInput([subscribed], {subscriptionDelivery: 'rate'}))
+    expect(params.line_items?.at(-1)).toEqual({
+      quantity: 1,
+      price_data: {
+        currency: 'eur',
+        unit_amount: 1200,
+        recurring: EVERY_6_WEEKS,
+        product_data: {name: 'Delivery: European Union', metadata: {delivery: 'eu'}},
+      },
+    })
+  })
+
+  it('delivers free once what repeats reaches the region’s amount', async () => {
+    const lines = (quantity: number) => [
+      {productId: 'serum', plan: 'subscribe', quantity},
+      // Bought once: it travels in the first parcel and doesn't count towards later ones.
+      {productId: 'magazine', quantity: 2},
+    ]
+    const one = paramsOf(await subscriptionInput(lines(1), {subscriptionDelivery: 'rate'}, 39))
+    expect(one.line_items).toHaveLength(3)
+    // Two at €19.79 are €39.58.
+    const two = paramsOf(await subscriptionInput(lines(2), {subscriptionDelivery: 'rate'}, 39))
+    expect(two.line_items).toHaveLength(2)
+  })
+
+  it('takes one interval per checkout', async () => {
+    const result = await subscriptionInput([
+      subscribed,
+      {productId: 'tonic', plan: 'subscribe', quantity: 1},
+    ])
+    expect(result).toMatchObject({
+      ok: false,
+      error: 'unavailable',
+      problems: [{productId: 'tonic', plan: 'subscribe', name: 'Tonic', reason: 'otherInterval'}],
+    })
+  })
+
+  it('refuses a subscription the product doesn’t offer', async () => {
+    const result = await subscriptionInput([{productId: 'poster', plan: 'subscribe', quantity: 1}])
+    expect(result).toMatchObject({
+      ok: false,
+      problems: [
+        {productId: 'poster', plan: 'subscribe', name: 'Poster', reason: 'noSubscription'},
+      ],
+    })
+  })
+
+  it('counts a product bought once and subscribed to against one stock count', async () => {
+    const input = await shopInput()
+    const magazine = input.products.find((product) => product._id === 'magazine')
+    const offered = Object.assign({}, magazine, {
+      commerce: Object.assign({}, magazine?.commerce, {
+        subscription: {enabled: true, price: 20, every: 1, unit: 'month'},
+      }),
+    })
+    // Three magazines are in stock.
+    const result = buildCheckoutSession({
+      ...input,
+      products: [offered],
+      lines: [
+        {productId: 'magazine', quantity: 2},
+        {productId: 'magazine', plan: 'subscribe', quantity: 2},
+      ],
+    })
+    expect(result).toMatchObject({
+      ok: false,
+      problems: [{productId: 'magazine', plan: 'subscribe', reason: 'tooMany', maxQuantity: 1}],
+    })
+  })
+
+  it('shows the promotion code field only when asked', async () => {
+    expect(paramsOf(await subscriptionInput([subscribed]))).not.toHaveProperty(
+      'allow_promotion_codes',
+    )
+    const asked = paramsOf(await subscriptionInput([subscribed], {promotionCodes: true}))
+    expect(asked.allow_promotion_codes).toBe(true)
+  })
+})
+
+describe('checkoutRoute with subscriptions', () => {
+  const serum: Doc = {_id: 'serum', _type: 'product', title: 'Serum', commerce: SERUM.commerce}
+
+  it('reads the subscription from the product and the delivery rule from the shop settings', async () => {
+    const stripeSide = fakeStripe()
+    const dataset = fakeDataset()
+    dataset.add(serum)
+    await dataset.writer
+      .transaction()
+      .patch(SHOP_SETTINGS_ID, {set: {subscriptionDelivery: 'rate'}})
+      .commit()
+    const route = checkoutRoute({
+      stripe: stripeSide.stripe,
+      client: dataset.reader,
+      stockClient: dataset.writer,
+      currency: 'eur',
+      successUrl: '/thanks?session_id={CHECKOUT_SESSION_ID}',
+      cancelUrl: '/cart',
+      integrationIdentifier: SHOP_TAG,
+      promotionCodes: true,
+      log: quiet,
+    })
+    const response = await route(checkoutRequest({lines: [subscribed], regionId: 'eu'}))
+    expect(response.status).toBe(200)
+    const body = stripeSide.calls[0]?.body
+    expect(body?.get('mode')).toBe('subscription')
+    expect(body?.get('line_items[0][price_data][unit_amount]')).toBe('1979')
+    expect(body?.get('line_items[0][price_data][recurring][interval]')).toBe('week')
+    expect(body?.get('line_items[0][price_data][recurring][interval_count]')).toBe('6')
+    expect(body?.get('line_items[1][price_data][product_data][metadata][delivery]')).toBe('eu')
+    expect(body?.get('line_items[1][price_data][unit_amount]')).toBe('1200')
+    expect(body?.get('allow_promotion_codes')).toBe('true')
+    expect([...(body?.keys() ?? [])].filter((key) => key.startsWith('shipping_options'))).toEqual(
+      [],
+    )
+  })
+})
+
+/** A paid subscription checkout of the test shop: a magazine every 6 weeks, plus its delivery. */
+const SUBSCRIPTION_SESSION = {
+  mode: 'subscription',
+  subscription: SUBSCRIPTION.id,
+  payment_intent: null,
+  shipping_cost: null,
+  amount_total: 3179,
+}
+const SUBSCRIPTION_LINES = [
+  {
+    id: 'li_1',
+    object: 'item',
+    description: 'Issue 16',
+    quantity: 1,
+    amount_total: 1979,
+    price: {
+      id: 'price_sub_1',
+      object: 'price',
+      recurring: EVERY_6_WEEKS,
+      product: {id: 'prod_sub_1', object: 'product', metadata: {productId: 'magazine'}},
+    },
+  },
+  {
+    id: 'li_2',
+    object: 'item',
+    description: 'Delivery: European Union',
+    quantity: 1,
+    amount_total: 1200,
+    price: {
+      id: 'price_sub_2',
+      object: 'price',
+      recurring: EVERY_6_WEEKS,
+      product: {id: 'prod_sub_2', object: 'product', metadata: {delivery: 'eu'}},
+    },
+  },
+]
+
+describe('getOrder for a subscription', () => {
+  it('says which lines repeat and how often, and counts the delivery line as shipping', async () => {
+    const {stripe} = fakeStripe({session: SUBSCRIPTION_SESSION, lineItems: SUBSCRIPTION_LINES})
+    const session = await stripe.checkout.sessions.retrieve('cs_test_1')
+    const order = await getOrder(stripe, session)
+    expect(order).toMatchObject({
+      sessionId: 'cs_test_1',
+      paymentIntentId: null,
+      subscription: {id: 'sub_test_1', interval: {unit: 'week', every: 6}},
+      amountTotal: 3179,
+      amountShipping: 1200,
+      items: [
+        {
+          productId: 'magazine',
+          name: 'Issue 16',
+          quantity: 1,
+          amountTotal: 1979,
+          subscription: true,
+        },
+      ],
+    })
+    expect(order).not.toHaveProperty('invoiceId')
+  })
+})
+
+describe('webhookRoute with subscriptions', () => {
+  const setup = (
+    options: {
+      session?: Record<string, unknown>
+      invoice?: Record<string, unknown>
+      onRenewal?: (order: Order, context: RenewalContext) => Promise<void>
+    } = {},
+  ) => {
+    const stripeSide = fakeStripe({
+      session: {...SUBSCRIPTION_SESSION, ...options.session},
+      lineItems: SUBSCRIPTION_LINES,
+      ...(options.invoice ? {invoice: options.invoice} : {}),
+    })
+    const dataset = fakeDataset()
+    const renewals: Array<{order: Order; context: RenewalContext}> = []
+    const onOrder = vi.fn()
+    const onRenewal = vi.fn(async (order: Order, context: RenewalContext) => {
+      renewals.push({order, context})
+      await options.onRenewal?.(order, context)
+    })
+    const onRenewalFailed = vi.fn()
+    const onSubscriptionEnded = vi.fn()
+    const onEvent = vi.fn()
+    const handler = webhookRoute({
+      stripe: stripeSide.stripe,
+      webhookSecret: WEBHOOK_SECRET,
+      integrationIdentifier: SHOP_TAG,
+      client: dataset.reader,
+      stockClient: dataset.writer,
+      onOrder,
+      onRenewal,
+      onRenewalFailed,
+      onSubscriptionEnded,
+      onEvent,
+      log: quiet,
+    })
+    const deliver = (type: string, object: Record<string, unknown> = RENEWAL_INVOICE) =>
+      handler(webhookRequest(stripeSide.stripe, type, object))
+    const magazines = () => dataset.value(stockId('magazine'), 'stockCount')
+    return {
+      ...stripeSide,
+      dataset,
+      renewals,
+      onOrder,
+      onRenewal,
+      onRenewalFailed,
+      onSubscriptionEnded,
+      onEvent,
+      deliver,
+      magazines,
+    }
+  }
+
+  it('fulfils the checkout that starts a subscription like any order', async () => {
+    const {deliver, onOrder, onRenewal, magazines} = setup()
+    const response = await deliver('checkout.session.completed', PAID_SESSION)
+    expect(response.status).toBe(200)
+    expect(onOrder).toHaveBeenCalledOnce()
+    expect(onOrder.mock.calls[0]?.[0]).toMatchObject({subscription: {id: 'sub_test_1'}})
+    expect(onRenewal).not.toHaveBeenCalled()
+    expect(magazines()).toBe(2)
+  })
+
+  it('leaves the first invoice alone: the checkout already fulfilled it', async () => {
+    const {deliver, onRenewal, magazines} = setup({
+      invoice: {billing_reason: 'subscription_create'},
+    })
+    expect((await deliver('invoice.paid')).status).toBe(200)
+    expect(onRenewal).not.toHaveBeenCalled()
+    expect(magazines()).toBe(3)
+  })
+
+  it('lowers stock and hands a renewal over, to the address the customer has now', async () => {
+    const {deliver, renewals, magazines, invoiceMetadata} = setup()
+    expect((await deliver('invoice.paid')).status).toBe(200)
+    expect(magazines()).toBe(2)
+    expect(renewals).toHaveLength(1)
+    expect(renewals[0]?.order).toMatchObject({
+      sessionId: 'cs_test_1',
+      invoiceId: 'in_test_1',
+      paymentIntentId: null,
+      subscription: {id: 'sub_test_1', interval: {unit: 'week', every: 6}},
+      currency: 'eur',
+      amountTotal: 3179,
+      amountShipping: 1200,
+      regionId: 'eu',
+      customer: {name: 'Ada Lovelace', email: 'ada@example.com'},
+      // The session shipped to Amsterdam; the customer has moved to Berlin since.
+      shipping: {name: 'Ada Lovelace', address: {city: 'Berlin', country: 'DE'}},
+      items: [
+        {
+          productId: 'magazine',
+          name: 'Issue 16',
+          quantity: 1,
+          amountTotal: 1979,
+          subscription: true,
+        },
+      ],
+    })
+    expect(renewals[0]?.context.stock).toEqual([{productId: 'magazine', from: 3, to: 2}])
+    expect(renewals[0]?.context.invoice.id).toBe('in_test_1')
+    expect(Object.keys(invoiceMetadata)).toContain('fulfilled_renewal')
+  })
+
+  it('does each step once when Stripe delivers the renewal again', async () => {
+    const {deliver, onRenewal, magazines, dataset} = setup()
+    await deliver('invoice.paid')
+    expect((await deliver('invoice.paid')).status).toBe(200)
+    expect(magazines()).toBe(2)
+    expect(onRenewal).toHaveBeenCalledOnce()
+    // The record of what the renewal did to stock is kept under the invoice's id.
+    expect(dataset.get(stockChangeId('in_test_1'))).toMatchObject({_type: STOCK_CHANGE_TYPE})
+  })
+
+  it('lets a paid renewal take a count below 0, and says so', async () => {
+    const {deliver, renewals, dataset, magazines} = setup()
+    await dataset.writer
+      .transaction()
+      .patch(stockId('magazine'), {set: {stockCount: 0}})
+      .commit()
+    expect((await deliver('invoice.paid')).status).toBe(200)
+    expect(magazines()).toBe(-1)
+    expect(renewals[0]?.context.stock).toEqual([{productId: 'magazine', from: 0, to: -1}])
+  })
+
+  it('leaves alone the renewal of a subscription sold elsewhere on the account', async () => {
+    const {deliver, onRenewal, magazines} = setup({
+      session: {integration_identifier: 'othershop_zyxwvuts'},
+    })
+    expect((await deliver('invoice.paid')).status).toBe(200)
+    expect(onRenewal).not.toHaveBeenCalled()
+    expect(magazines()).toBe(3)
+  })
+
+  it('goes by the invoice Stripe’s API returns, not the one in the event', async () => {
+    const {deliver, onRenewal, magazines} = setup({invoice: {status: 'open'}})
+    // The delivery claims "paid"; Stripe's API says the invoice is still open.
+    expect((await deliver('invoice.paid')).status).toBe(200)
+    expect(onRenewal).not.toHaveBeenCalled()
+    expect(magazines()).toBe(3)
+  })
+
+  it('answers 500 when a renewal can’t be handed over, and tries that step alone next time', async () => {
+    let failing = true
+    const {deliver, onRenewal, magazines} = setup({
+      onRenewal: async () => {
+        if (failing) throw new Error('The mail server is down')
+      },
+    })
+    expect((await deliver('invoice.paid')).status).toBe(500)
+    expect(magazines()).toBe(2)
+    failing = false
+    expect((await deliver('invoice.paid')).status).toBe(200)
+    expect(magazines()).toBe(2)
+    expect(onRenewal).toHaveBeenCalledTimes(2)
+  })
+
+  it('tells the site when a renewal’s payment fails or a subscription ends', async () => {
+    const {deliver, onRenewalFailed, onSubscriptionEnded, onRenewal} = setup()
+    expect((await deliver('invoice.payment_failed')).status).toBe(200)
+    expect(onRenewalFailed).toHaveBeenCalledOnce()
+    expect(onRenewalFailed.mock.calls[0]?.[0]).toMatchObject({id: 'in_test_1'})
+    expect((await deliver('customer.subscription.deleted', SUBSCRIPTION)).status).toBe(200)
+    expect(onSubscriptionEnded).toHaveBeenCalledOnce()
+    expect(onSubscriptionEnded.mock.calls[0]?.[0]).toMatchObject({id: 'sub_test_1'})
+    expect(onRenewal).not.toHaveBeenCalled()
+  })
+
+  it('says nothing about another shop’s failed payments and ended subscriptions', async () => {
+    const {deliver, onRenewalFailed, onSubscriptionEnded} = setup({
+      session: {integration_identifier: null},
+    })
+    await deliver('invoice.payment_failed')
+    await deliver('customer.subscription.deleted', SUBSCRIPTION)
+    expect(onRenewalFailed).not.toHaveBeenCalled()
+    expect(onSubscriptionEnded).not.toHaveBeenCalled()
+  })
+
+  it('passes every other signed event to the site', async () => {
+    const {deliver, onEvent, onOrder, onRenewal} = setup()
+    const dispute = {id: 'dp_test_1', object: 'dispute'}
+    expect((await deliver('charge.dispute.created', dispute)).status).toBe(200)
+    expect(onEvent).toHaveBeenCalledOnce()
+    expect(onEvent.mock.calls[0]?.[0]).toMatchObject({type: 'charge.dispute.created'})
+    expect(onOrder).not.toHaveBeenCalled()
+    expect(onRenewal).not.toHaveBeenCalled()
+  })
+})
+
+describe('portalRoute', () => {
+  const LOGIN = 'https://billing.stripe.com/p/login/test_abc123'
+
+  it('sends the visitor to the portal’s login page, and asks Stripe for it once', async () => {
+    const {stripe, calls} = fakeStripe({portalUrl: LOGIN})
+    const route = portalRoute({stripe, log: quiet})
+    const response = await route()
+    expect(response.status).toBe(303)
+    expect(response.headers.get('Location')).toBe(LOGIN)
+    expect(response.headers.get('Cache-Control')).toBe('no-store')
+    await route()
+    expect(calls).toHaveLength(1)
+    expect(calls[0]?.path).toBe('/v1/billing_portal/configurations')
+    expect(calls[0]?.query.get('is_default')).toBe('true')
+  })
+
+  it('answers 503 and says how to switch the login link on', async () => {
+    const log = vi.fn()
+    const response = await portalRoute({stripe: fakeStripe().stripe, log})()
+    expect(response.status).toBe(503)
+    expect(await response.text()).toBe("The account page isn't available right now.")
+    expect(log).toHaveBeenCalledWith('error', expect.stringContaining('Activate it'))
+  })
+
+  it('answers 503 before the site has a Stripe key', async () => {
+    const response = await portalRoute({stripe: null, message: 'Later.', log: quiet})()
+    expect(response.status).toBe(503)
+    expect(await response.text()).toBe('Later.')
+  })
+})
+
+describe('orderEmail for subscriptions', () => {
+  const base: Order = {
+    sessionId: 'cs_test_1',
+    paymentIntentId: null,
+    subscription: {id: 'sub_test_1', interval: {unit: 'week', every: 6}},
+    livemode: true,
+    currency: 'gbp',
+    amountTotal: 4178,
+    amountShipping: 0,
+    customer: {name: 'Ada Lovelace', email: 'ada@example.com', phone: null},
+    shipping: {name: 'Ada Lovelace', address: null},
+    items: [
+      {productId: 'serum', name: 'Serum', quantity: 1, amountTotal: 1979, subscription: true},
+      {productId: 'serum', name: 'Serum', quantity: 1, amountTotal: 2199},
+    ],
+    createdAt: new Date('2026-11-11T12:00:00Z'),
+  }
+
+  it('says which lines of a first order repeat, and links to the subscription', () => {
+    const email = orderEmail(base, {shopName: 'Example'})
+    expect(email.subject).toBe('Example order from Ada Lovelace: 2 items, £41.78')
+    expect(email.text).toContain('1 × Serum (subscription, every 6 weeks)  £19.79')
+    expect(email.text).toContain('1 × Serum  £21.99')
+    expect(email.text).toContain('https://dashboard.stripe.com/subscriptions/sub_test_1')
+  })
+
+  it('calls a renewal a renewal, and links to its invoice', () => {
+    const renewal: Order = {
+      ...base,
+      invoiceId: 'in_test_1',
+      amountTotal: 1979,
+      items: base.items.slice(0, 1),
+    }
+    const email = orderEmail(renewal, {shopName: 'Example'})
+    expect(email.subject).toBe('Example renewal for Ada Lovelace: 1 item, £19.79')
+    expect(email.text).toContain('Subscription renewal on 2026-11-11')
+    expect(email.text).toContain('1 × Serum  £19.79')
+    expect(email.text).toContain('https://dashboard.stripe.com/invoices/in_test_1')
+    expect(email.html).toContain('Subscription renewal on 2026-11-11')
   })
 })

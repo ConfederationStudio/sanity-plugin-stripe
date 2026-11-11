@@ -3,8 +3,11 @@ import {describe, expect, it} from 'vitest'
 import {
   cartRows,
   cartSubtotal,
+  describeInterval,
+  lineKey,
   lineStatus,
   readCartProducts,
+  readSubscription,
   sanitizeLines,
   type CartProduct,
 } from './cart'
@@ -19,7 +22,13 @@ import {
   productVersionsQuery,
   SHOP_SETTINGS_QUERY,
 } from './queries'
-import {readShopSettings, regionOptions, regionsFromSettings, resolveRegions} from './regions'
+import {
+  readShopSettings,
+  regionOptions,
+  regionsFromSettings,
+  resolveRegions,
+  shippingQuote,
+} from './regions'
 import {readStockDocuments, STOCK_QUERY, stockLeft} from './stock'
 
 const magazine: CartProduct = {
@@ -217,7 +226,7 @@ describe('queries', () => {
       image: 'cover.asset->url',
     }
     expect(checkoutProductsQuery(options)).toBe(
-      `*[_type in ["book", "print"] && _id in $ids]{_id, "title": name, "slug": slug.current, "imageUrl": cover.asset->url, "commerce": shop{availability, price, taxClass, variants[]{_key, label, availability}}}`,
+      `*[_type in ["book", "print"] && _id in $ids]{_id, "title": name, "slug": slug.current, "imageUrl": cover.asset->url, "commerce": shop{availability, price, taxClass, variants[]{_key, label, availability}, subscription{enabled, price, every, unit}}}`,
     )
   })
 
@@ -297,5 +306,116 @@ describe('readers', () => {
   it('drops what isn’t a product document', () => {
     expect(readCartProducts([magazine, null, {title: 'No id'}])).toEqual([magazine])
     expect(readCartProducts(undefined)).toEqual([])
+  })
+})
+
+describe('subscriptions in the cart', () => {
+  const serum: CartProduct = {
+    _id: 'serum',
+    title: 'Serum',
+    commerce: {
+      availability: 'onSale',
+      price: 21.99,
+      subscription: {enabled: true, price: 19.79, every: 6, unit: 'week'},
+    },
+  }
+
+  it('reads a subscription only when it is switched on and filled in', () => {
+    expect(readSubscription(serum.commerce?.subscription)).toEqual({
+      price: 19.79,
+      interval: {unit: 'week', every: 6},
+    })
+    const broken = [
+      undefined,
+      null,
+      {enabled: false, price: 19.79, every: 6, unit: 'week'},
+      {enabled: true, every: 6, unit: 'week'},
+      {enabled: true, price: 19.79, every: 0, unit: 'week'},
+      {enabled: true, price: 19.79, every: 1.5, unit: 'week'},
+      {enabled: true, price: 19.79, every: 6, unit: 'day'},
+      // Stripe charges at least once every three years.
+      {enabled: true, price: 19.79, every: 157, unit: 'week'},
+      {enabled: true, price: 19.79, every: 37, unit: 'month'},
+    ]
+    for (const subscription of broken) expect(readSubscription(subscription)).toBeNull()
+  })
+
+  it('says how often in plain words', () => {
+    expect(describeInterval({unit: 'week', every: 6})).toBe('every 6 weeks')
+    expect(describeInterval({unit: 'month', every: 1})).toBe('every month')
+  })
+
+  it('keeps a product bought once and subscribed to on two lines', () => {
+    const once = {productId: 'serum', quantity: 1}
+    const subscribed = {productId: 'serum', plan: 'subscribe', quantity: 1}
+    expect(lineKey(once)).toBe('serum:')
+    expect(lineKey({productId: 'serum', plan: 'subscribe'})).toBe('serum::subscribe')
+    expect(sanitizeLines([once, subscribed, subscribed, {...once, plan: 'gift'}])).toEqual([
+      {productId: 'serum', quantity: 2},
+      {productId: 'serum', plan: 'subscribe', quantity: 2},
+    ])
+  })
+
+  it('prices a subscribed line per delivery, and says how often', () => {
+    expect(lineStatus(serum)).toMatchObject({available: true, price: 21.99})
+    expect(lineStatus(serum)).not.toHaveProperty('interval')
+    expect(lineStatus(serum, undefined, 10, 'subscribe')).toMatchObject({
+      available: true,
+      price: 19.79,
+      interval: {unit: 'week', every: 6},
+    })
+    expect(lineStatus(magazine, undefined, 10, 'subscribe')).toEqual({
+      available: false,
+      reason: 'noSubscription',
+    })
+    const rows = cartRows(
+      [
+        {productId: 'serum', quantity: 1},
+        {productId: 'serum', plan: 'subscribe', quantity: 2},
+      ],
+      [serum],
+    )
+    expect(rows.map((row) => row.total)).toEqual([21.99, 39.58])
+    expect(cartSubtotal(rows)).toBeCloseTo(61.57)
+  })
+
+  it('reads the subscription with the product, and no stock with it', () => {
+    expect(COMMERCE_PROJECTION).toContain('subscription{enabled, price, every, unit}')
+    expect(COMMERCE_PROJECTION).not.toContain('stockCount')
+  })
+})
+
+describe('free delivery from an amount', () => {
+  const settings = readShopSettings({
+    shippingRegions: [
+      {_key: 'uk', title: 'United Kingdom', countries: ['GB'], rate: 3.95, freeFrom: 25},
+      {_key: 'ie', title: 'Ireland', countries: ['IE'], rate: 6, freeFrom: 0},
+      {_key: 'world', title: 'Rest of the world', everywhereElse: true, rate: 18},
+    ],
+    subscriptionDelivery: 'rate',
+  })
+
+  it('reads the amount with the region, and the rule for subscriptions with the settings', () => {
+    expect(SHOP_SETTINGS_QUERY).toContain('freeFrom')
+    expect(SHOP_SETTINGS_QUERY).toContain('subscriptionDelivery')
+    expect(settings?.subscriptionDelivery).toBe('rate')
+    expect(readShopSettings({subscriptionDelivery: 'sometimes'})?.subscriptionDelivery).toBeNull()
+    expect(regionOptions(settings)).toEqual([
+      {id: 'uk', title: 'United Kingdom', rate: 3.95, freeFrom: 25},
+      // An amount of 0 is no amount: a region that is always free has a rate of 0.
+      {id: 'ie', title: 'Ireland', rate: 6},
+      {id: 'world', title: 'Rest of the world', rate: 18},
+    ])
+  })
+
+  it('tells the cart what delivery costs and how much more makes it free', () => {
+    const [uk, , world] = regionOptions(settings)
+    if (!uk || !world) throw new Error('The regions are missing')
+    expect(shippingQuote(uk, 21.99)).toEqual({amount: 3.95, missing: 3.01})
+    expect(shippingQuote(uk, 25)).toEqual({amount: 0, missing: 0})
+    // 19.99 + 5.01 is a hair over or under 25 in floating point: it still counts.
+    expect(shippingQuote(uk, 19.99 + 5.01)).toEqual({amount: 0, missing: 0})
+    expect(shippingQuote(uk, 43.98)).toEqual({amount: 0, missing: 0})
+    expect(shippingQuote(world, 500)).toEqual({amount: 18, missing: null})
   })
 })

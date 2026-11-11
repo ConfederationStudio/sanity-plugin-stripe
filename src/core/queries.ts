@@ -40,7 +40,7 @@ const typeFilter = (types: readonly string[]) =>
   `_type in [${types.map((type) => JSON.stringify(type)).join(', ')}]`
 
 /** The price-and-availability field as the cart and the checkout read it. No stock counts. */
-export const COMMERCE_PROJECTION = `{availability, price, taxClass, variants[]{_key, label, availability}}`
+export const COMMERCE_PROJECTION = `{availability, price, taxClass, variants[]{_key, label, availability}, subscription{enabled, price, every, unit}}`
 
 /**
  * What the cart and the checkout need of a product, for the site's own queries:
@@ -87,5 +87,5 @@ export function productVersionsQuery(
   }
 }
 
-/** The shop settings: shipping regions and whether stock sells out by itself. */
-export const SHOP_SETTINGS_QUERY = `*[_type == "${SHOP_SETTINGS_TYPE}" && _id == "${SHOP_SETTINGS_ID}"][0]{shippingRegions[]{_key, title, everywhereElse, countries, rate}, autoSoldOut}`
+/** The shop settings: shipping regions, selling out at 0, and delivery for subscriptions. */
+export const SHOP_SETTINGS_QUERY = `*[_type == "${SHOP_SETTINGS_TYPE}" && _id == "${SHOP_SETTINGS_ID}"][0]{shippingRegions[]{_key, title, everywhereElse, countries, rate, freeFrom}, autoSoldOut, subscriptionDelivery}`

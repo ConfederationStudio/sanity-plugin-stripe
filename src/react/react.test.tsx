@@ -132,6 +132,42 @@ describe('useBuyBox', () => {
     act(() => result.current.add())
     expect(result.current.inCart).toBe(0)
   })
+
+  it('lets the buyer subscribe, on a cart line of its own', () => {
+    const serum: CartProduct = {
+      _id: 'serum',
+      title: 'Serum',
+      commerce: {
+        availability: 'onSale',
+        price: 21.99,
+        subscription: {enabled: true, price: 19.79, every: 6, unit: 'week'},
+      },
+    }
+    const {result} = renderHook(() => useBuyBox(serum), {wrapper})
+    expect(result.current.subscription).toEqual({price: 19.79, interval: {unit: 'week', every: 6}})
+    expect(result.current.plan).toBe('once')
+    expect(result.current.status).toMatchObject({available: true, price: 21.99})
+
+    act(() => result.current.add())
+    act(() => result.current.choosePlan('subscribe'))
+    expect(result.current.added).toBe(false)
+    expect(result.current.status).toMatchObject({price: 19.79, interval: {unit: 'week', every: 6}})
+    expect(result.current.inCart).toBe(0)
+    act(() => result.current.add())
+    expect(result.current.inCart).toBe(1)
+    expect(stored()).toEqual([
+      {productId: 'serum', quantity: 1},
+      {productId: 'serum', plan: 'subscribe', quantity: 1},
+    ])
+  })
+
+  it('offers no subscription on a product without one', () => {
+    const {result} = renderHook(() => useBuyBox(shirt), {wrapper})
+    expect(result.current.subscription).toBeNull()
+    act(() => result.current.choosePlan('subscribe'))
+    expect(result.current.plan).toBe('once')
+    expect(result.current.status).toMatchObject({available: true, price: 29.5})
+  })
 })
 
 describe('ClearCartOnReturn', () => {

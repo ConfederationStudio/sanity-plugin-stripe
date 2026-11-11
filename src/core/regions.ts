@@ -10,7 +10,12 @@ export interface ShippingRegion {
   everywhereElse: boolean
   /** In currency units. */
   rate: number
+  /** Goods adding up to this amount or more are delivered free. In currency units. */
+  freeFrom?: number
 }
+
+/** How a subscription pays for delivery: nothing extra, or the region's rate with every delivery. */
+export type SubscriptionDelivery = 'free' | 'rate'
 
 /** The shop settings document, as `SHOP_SETTINGS_QUERY` returns it. */
 export interface ShopSettings {
@@ -20,8 +25,10 @@ export interface ShopSettings {
     everywhereElse?: boolean | null
     countries?: string[] | null
     rate?: number | null
+    freeFrom?: number | null
   }> | null
   autoSoldOut?: boolean | null
+  subscriptionDelivery?: SubscriptionDelivery | null
 }
 
 /** The shop settings as Sanity returned them, or null when they aren't published yet. */
@@ -39,11 +46,16 @@ export function readShopSettings(value: unknown): ShopSettings | null {
                 (country): country is string => typeof country === 'string',
               ),
               rate: asNumber(region.rate),
+              freeFrom: asNumber(region.freeFrom),
             },
           ]
         : [],
     ),
     autoSoldOut: typeof value.autoSoldOut === 'boolean' ? value.autoSoldOut : null,
+    subscriptionDelivery:
+      value.subscriptionDelivery === 'rate' || value.subscriptionDelivery === 'free'
+        ? value.subscriptionDelivery
+        : null,
   }
 }
 
@@ -58,6 +70,9 @@ export function regionsFromSettings(settings: ShopSettings | null | undefined): 
             countries: region.countries ?? [],
             everywhereElse: Boolean(region.everywhereElse),
             rate: region.rate,
+            ...(typeof region.freeFrom === 'number' && region.freeFrom > 0
+              ? {freeFrom: region.freeFrom}
+              : {}),
           },
         ]
       : [],
@@ -84,13 +99,39 @@ export function resolveRegions(regions: readonly ShippingRegion[]): ShippingRegi
 }
 
 /** What a cart page needs of each region: no country lists. */
-export type RegionOption = Pick<ShippingRegion, 'id' | 'title' | 'rate'>
+export type RegionOption = Pick<ShippingRegion, 'id' | 'title' | 'rate' | 'freeFrom'>
 
 /** The regions a buyer can choose from, the same ones the checkout accepts. */
 export function regionOptions(settings: ShopSettings | null | undefined): RegionOption[] {
-  return resolveRegions(regionsFromSettings(settings)).map(({id, title, rate}) => ({
-    id,
-    title,
-    rate,
-  }))
+  return resolveRegions(regionsFromSettings(settings)).map(({id, title, rate, freeFrom}) => {
+    const option: RegionOption = {id, title, rate}
+    if (freeFrom !== undefined) option.freeFrom = freeFrom
+    return option
+  })
+}
+
+/** What delivery costs for an order, and how far the order is from free delivery. */
+export interface ShippingQuote {
+  /** What the region charges for this order, in currency units. 0 when it is free. */
+  amount: number
+  /**
+   * How much more makes delivery free, in currency units: 0 once it is, null when the region has
+   * no "free from" amount.
+   */
+  missing: number | null
+}
+
+/**
+ * What a region charges for goods adding up to `subtotal`, for the cart page. The checkout works
+ * it out again on the server. It goes by the goods before any promotion code: a code is typed on
+ * Stripe's page, after the delivery charge is set.
+ */
+export function shippingQuote(
+  region: Pick<ShippingRegion, 'rate' | 'freeFrom'>,
+  subtotal: number,
+): ShippingQuote {
+  if (region.freeFrom === undefined) return {amount: region.rate, missing: null}
+  // Amounts are typed with a few decimals; a sum of them can land a hair under the amount.
+  const missing = Math.round((region.freeFrom - subtotal) * 10000) / 10000
+  return missing <= 0 ? {amount: 0, missing: 0} : {amount: region.rate, missing}
 }

@@ -18,15 +18,18 @@ export {
 export {
   cartRows,
   cartSubtotal,
+  describeInterval,
   lineKey,
+  readSubscription,
   type Availability,
   type CartLine,
   type CartProduct,
   type CartRow,
   type CartVariant,
   type CheckoutProblem,
+  type Interval,
   type LineStatus,
   type Unavailable,
 } from '../core/cart'
 export {formatMoney, formatPrice} from '../core/money'
-export type {RegionOption} from '../core/regions'
+export {shippingQuote, type RegionOption, type ShippingQuote} from '../core/regions'

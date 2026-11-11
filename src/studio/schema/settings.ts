@@ -5,6 +5,7 @@ import {defineArrayMember, defineField, defineType} from 'sanity'
 import {asArray, isObject} from '../../core/guards'
 import {SHIPPING_REGION_TYPE, SHOP_SETTINGS_TYPE} from '../../core/ids'
 import {formatPrice} from '../../core/money'
+import type {SubscriptionDelivery} from '../../core/regions'
 import {moneyTitle, type ResolvedConfig} from '../config'
 import {createRegionsInput} from '../RegionsInput'
 
@@ -18,6 +19,8 @@ export interface ShippingRegionValue {
   countries?: string[]
   /** Flat rate per order, in currency units. */
   rate: number
+  /** Goods adding up to this amount or more are delivered free. In currency units. */
+  freeFrom?: number
 }
 
 /**
@@ -27,7 +30,13 @@ export interface ShippingRegionValue {
 export interface ShopSettingsValue {
   shippingRegions?: ShippingRegionValue[]
   autoSoldOut?: boolean
+  subscriptionDelivery?: SubscriptionDelivery
 }
+
+const SUBSCRIPTION_DELIVERY: Array<{title: string; value: SubscriptionDelivery}> = [
+  {title: 'Free: delivery is in the subscription price', value: 'free'},
+  {title: 'The region’s rate with every delivery', value: 'rate'},
+]
 
 // A region as validation and `hidden` get it: unknown, and maybe half filled in.
 const coversEverywhereElse = (region: unknown) => isObject(region) && region.everywhereElse === true
@@ -42,6 +51,7 @@ export function initialRegions(config: ResolvedConfig): ShippingRegionValue[] {
       ? {everywhereElse: true}
       : {countries: [...(region.countries ?? [])]}),
     rate: region.rate,
+    ...(typeof region.freeFrom === 'number' ? {freeFrom: region.freeFrom} : {}),
   }))
 }
 
@@ -95,18 +105,30 @@ export function createShippingRegionType(config: ResolvedConfig) {
         description: 'One flat rate per order.',
         validation: (rule) => rule.required().min(0).precision(config.priceDecimals),
       }),
+      defineField({
+        name: 'freeFrom',
+        title: `Free from (${config.currencyLabel})`,
+        type: 'number',
+        description:
+          'Optional. An order whose goods add up to this amount or more is delivered free. It goes by the goods before any promotion code.',
+        validation: (rule) => rule.positive().precision(config.priceDecimals),
+      }),
     ],
     preview: {
       select: {
         title: 'title',
         rate: 'rate',
+        freeFrom: 'freeFrom',
         countries: 'countries',
         everywhereElse: 'everywhereElse',
       },
-      prepare: ({title, rate, countries, everywhereElse}) => ({
+      prepare: ({title, rate, freeFrom, countries, everywhereElse}) => ({
         title,
         subtitle: [
           typeof rate === 'number' ? formatPrice(rate, config.currency) : 'No rate',
+          ...(typeof freeFrom === 'number'
+            ? [`free from ${formatPrice(freeFrom, config.currency)}`]
+            : []),
           everywhereElse ? 'every other country' : countCountries(asArray(countries).length),
         ].join(' · '),
       }),
@@ -163,6 +185,15 @@ export function createShopSettingsType(config: ResolvedConfig) {
         type: 'boolean',
         description: 'When the stock count of a product or variant reaches 0, mark it sold out.',
         initialValue: true,
+      }),
+      defineField({
+        name: 'subscriptionDelivery',
+        title: 'Delivery for subscriptions',
+        type: 'string',
+        description:
+          'Only matters when a product offers a subscription. With the region’s rate, the rate is charged with the first delivery and every one after it, unless the subscription reaches the region’s "free from" amount.',
+        options: {list: SUBSCRIPTION_DELIVERY, layout: 'radio'},
+        initialValue: 'free',
       }),
     ],
     preview: {prepare: () => ({title: 'Shop settings'})},

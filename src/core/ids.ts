@@ -1,6 +1,7 @@
 /** Schema type names. They are saved in content, so they never change. */
 export const COMMERCE_TYPE = 'stripeCommerce'
 export const VARIANT_TYPE = 'stripeVariant'
+export const SUBSCRIPTION_TYPE = 'stripeSubscription'
 export const SHIPPING_REGION_TYPE = 'stripeShippingRegion'
 export const SHOP_SETTINGS_TYPE = 'stripeShopSettings'
 

@@ -20,6 +20,8 @@ export interface ShippingRegionInput {
   everywhereElse?: boolean
   /** One flat rate per order, in currency units. */
   rate: number
+  /** Goods adding up to this amount or more are delivered free. In currency units. */
+  freeFrom?: number
 }
 
 export interface StripeCommerceConfig {

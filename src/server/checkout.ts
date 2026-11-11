@@ -8,9 +8,10 @@ import {
   type CartLine,
   type CartProduct,
   type CheckoutProblem,
+  type Interval,
 } from '../core/cart'
 import {toMinorUnits} from '../core/money'
-import {resolveRegions, type ShippingRegion} from '../core/regions'
+import {resolveRegions, type ShippingRegion, type SubscriptionDelivery} from '../core/regions'
 import {stockLeft, type ProductStock} from '../core/stock'
 
 /**
@@ -20,6 +21,9 @@ import {stockLeft, type ProductStock} from '../core/stock'
 
 type SessionParams = Stripe.Checkout.SessionCreateParams
 type LineItemParams = Stripe.Checkout.SessionCreateParams.LineItem
+
+/** The key, in a Stripe product's metadata, that marks a subscription's delivery charge. */
+export const DELIVERY_KEY = 'delivery'
 
 export interface CheckoutInput {
   /** The cart as the browser sent it. Checked here, so pass the raw value. */
@@ -46,11 +50,17 @@ export interface CheckoutInput {
   hideRemaining?: boolean
   /** When the session stops taking payment, as a Unix time. Stripe's default is 24 hours on. */
   expiresAt?: number
+  /** How a subscription pays for delivery, from the shop settings. Default `free`. */
+  subscriptionDelivery?: SubscriptionDelivery
+  /** Shows the field for a promotion code on Stripe's page. */
+  promotionCodes?: boolean
 }
 
 export type CheckoutResult =
   | {ok: true; params: SessionParams; lines: CartLine[]; region: ShippingRegion}
   | {ok: false; error: 'empty' | 'region' | 'unavailable'; problems: CheckoutProblem[]}
+
+const sameInterval = (a: Interval, b: Interval) => a.unit === b.unit && a.every === b.every
 
 export function buildCheckoutSession(input: CheckoutInput): CheckoutResult {
   const max = input.maxQuantity ?? MAX_QUANTITY
@@ -64,17 +74,25 @@ export function buildCheckoutSession(input: CheckoutInput): CheckoutResult {
   const products = new Map(input.products.map((product) => [product._id, product]))
   const problems: CheckoutProblem[] = []
   const lineItems: LineItemParams[] = []
+  // A product can be in the cart twice, bought once and subscribed to: both draw on one count.
+  const taken = new Map<string, number>()
+  // One checkout takes one interval: the first subscription in the cart sets it.
+  let interval: Interval | undefined
+  // In the currency's minor unit: everything in the cart, and the part of it that repeats.
+  let goods = 0
+  let repeating = 0
 
   for (const line of lines) {
     const product = products.get(line.productId)
-    const status = lineStatus(product, line.variantKey, max)
+    const status = lineStatus(product, line.variantKey, max, line.plan)
     const ref = {
       productId: line.productId,
       ...(line.variantKey ? {variantKey: line.variantKey} : {}),
     }
+    const asked = {...ref, ...(line.plan ? {plan: line.plan} : {})}
     if (!product || !status.available) {
       problems.push({
-        ...ref,
+        ...asked,
         ...(product?.title ? {name: product.title} : {}),
         reason: status.available ? 'missing' : status.reason,
       })
@@ -83,21 +101,36 @@ export function buildCheckoutSession(input: CheckoutInput): CheckoutResult {
     const name = lineName(product, status.variant)
 
     // Counts are private, so this is the one place a buyer meets them.
-    const left = stockLeft(input.stock?.get(line.productId), line.variantKey)
+    const counted = stockLeft(input.stock?.get(line.productId), line.variantKey)
+    const stockKey = `${line.productId}:${line.variantKey ?? ''}`
+    const left = counted === null ? null : counted - (taken.get(stockKey) ?? 0)
     if (left !== null && left <= 0) {
-      problems.push({...ref, name, reason: 'soldOut'})
+      problems.push({...asked, name, reason: 'soldOut'})
       continue
     }
     const most = left === null ? status.maxQuantity : Math.min(status.maxQuantity, left)
     if (line.quantity > most) {
       problems.push({
-        ...ref,
+        ...asked,
         name,
         reason: 'tooMany',
         ...(input.hideRemaining ? {} : {maxQuantity: most}),
       })
       continue
     }
+    taken.set(stockKey, (taken.get(stockKey) ?? 0) + line.quantity)
+
+    if (status.interval) {
+      interval ??= status.interval
+      if (!sameInterval(status.interval, interval)) {
+        problems.push({...asked, name, reason: 'otherInterval'})
+        continue
+      }
+    }
+
+    const unitAmount = toMinorUnits(status.price, currency)
+    goods += unitAmount * line.quantity
+    if (status.interval) repeating += unitAmount * line.quantity
 
     const taxClass = product.commerce?.taxClass
     const taxRate = taxClass ? input.taxRates?.[taxClass] : undefined
@@ -105,7 +138,10 @@ export function buildCheckoutSession(input: CheckoutInput): CheckoutResult {
       quantity: line.quantity,
       price_data: {
         currency,
-        unit_amount: toMinorUnits(status.price, currency),
+        unit_amount: unitAmount,
+        ...(status.interval
+          ? {recurring: {interval: status.interval.unit, interval_count: status.interval.every}}
+          : {}),
         product_data: {
           name,
           ...(product.imageUrl ? {images: [product.imageUrl]} : {}),
@@ -119,27 +155,54 @@ export function buildCheckoutSession(input: CheckoutInput): CheckoutResult {
 
   if (problems.length) return {ok: false, error: 'unavailable', problems}
 
+  // Free delivery goes by the goods before any promotion code: the code is typed on Stripe's
+  // page, after this charge is set.
+  const rate = toMinorUnits(region.rate, currency)
+  const freeFrom = region.freeFrom === undefined ? null : toMinorUnits(region.freeFrom, currency)
+  const charge = (amount: number) => (freeFrom !== null && amount >= freeFrom ? 0 : rate)
+
+  // Stripe has no shipping options for a subscription. Delivery is either in the subscription's
+  // price, or a line of its own that repeats with it; then it goes by what each later parcel
+  // holds, the lines that repeat.
+  if (interval && input.subscriptionDelivery === 'rate' && charge(repeating) > 0) {
+    lineItems.push({
+      quantity: 1,
+      price_data: {
+        currency,
+        unit_amount: charge(repeating),
+        recurring: {interval: interval.unit, interval_count: interval.every},
+        product_data: {name: `Delivery: ${region.title}`, metadata: {[DELIVERY_KEY]: region.id}},
+      },
+    })
+  }
+
+  const where = {region: region.id, regionTitle: region.title}
   return {
     ok: true,
     lines,
     region,
     params: {
-      mode: 'payment',
+      mode: interval ? 'subscription' : 'payment',
       line_items: lineItems,
       // No payment method list: Stripe shows what the Dashboard has switched on.
       shipping_address_collection: {allowed_countries: region.countries},
-      shipping_options: [
-        {
-          shipping_rate_data: {
-            type: 'fixed_amount',
-            display_name: region.title,
-            fixed_amount: {amount: toMinorUnits(region.rate, currency), currency},
-          },
-        },
-      ],
+      ...(interval
+        ? {subscription_data: {metadata: where}}
+        : {
+            shipping_options: [
+              {
+                shipping_rate_data: {
+                  type: 'fixed_amount',
+                  display_name: region.title,
+                  fixed_amount: {amount: charge(goods), currency},
+                },
+              },
+            ],
+          }),
+      ...(input.promotionCodes ? {allow_promotion_codes: true} : {}),
       success_url: input.successUrl,
       cancel_url: input.cancelUrl,
-      metadata: {region: region.id, regionTitle: region.title},
+      metadata: where,
       integration_identifier: input.integrationIdentifier,
       ...(input.expiresAt ? {expires_at: input.expiresAt} : {}),
     },
