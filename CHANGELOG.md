@@ -2,7 +2,7 @@
 
 Until 1.0, a minor version may change the API. Each change that needs work on a site or Studio says what to do.
 
-## Unreleased
+## 0.3.0 (2026-11-12)
 
 An Orders tab in the Studio. Nothing has to change on a site that doesn't want it.
 
