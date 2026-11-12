@@ -71,6 +71,8 @@ export function failureText(failure: unknown, api: string): string {
       return 'The site doesn’t accept this Studio’s address. Add it to studioOrigins in the site’s Studio routes.'
     case 'forbidden-role':
       return 'Your role in this project may not see orders. An administrator can change which roles may.'
+    case 'api-token':
+      return 'This Studio is signed in with an API token, and the site shows orders to people only. Sign in with your own account.'
     case 'no-stripe':
       return 'The site has no Stripe key, so it can’t read orders.'
     case 'sanity-failed':

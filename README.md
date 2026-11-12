@@ -289,7 +289,7 @@ The tab lists this shop's completed checkouts and its subscriptions' renewals, n
 How it stays private:
 
 - **Nothing is saved.** The Studio asks your site, your site asks Stripe, and the answer is shown. No order is written to the dataset and none is cached.
-- **The Studio holds no Stripe key.** It sends the editor's own Sanity sign-in to your route. The route asks Sanity whose it is, and answers only a member of the project whose role is in `roles`: administrators and editors unless you say otherwise. Viewers get nothing.
+- **The Studio holds no Stripe key.** It sends the editor's own Sanity sign-in to your route. The route asks Sanity whose it is, and answers only a member of the project whose role is in `roles`: administrators and editors unless you say otherwise. Viewers get nothing, and neither does an API token, whatever its rights: orders are for people signed in.
 - **Other websites get nothing.** The route answers the addresses in `studioOrigins` and the site's own. A Studio that lives on the site, at `/studio`, needs no entry and can pass `api: '/api/shop'`.
 - **Only this shop's orders.** Payments made another way on the same Stripe account, a Payment Link or another site, are left out.
 
@@ -434,6 +434,7 @@ Returns `{GET, OPTIONS}`. Mount it on a catch-all path: it answers `…/orders` 
 | `projectId`             | The Sanity project the Studio belongs to. It is asked who each caller is. Required.                       |
 | `studioOrigins`         | Where the Studio runs, such as `['https://myshop.sanity.studio']`. The site's own address needs no entry. |
 | `roles`                 | Project roles that may read orders, by name. Default `['administrator', 'editor']`.                       |
+| `allowApiTokens`        | Answer an API token of the project like a person. Default false.                                          |
 
 ## What it doesn't do
 
@@ -451,7 +452,9 @@ Returns `{GET, OPTIONS}`. Mount it on a catch-all path: it answers `…/orders` 
 - Keys come from your environment and are passed in. Use a restricted key, and a separate one for each environment.
 - Names inside the plugin's GROQ (document types, the field name) are checked when the routes are made. Ids travel as query parameters.
 - The order email escapes everything a buyer typed.
-- The routes behind the Orders tab answer a signed-in member of the Sanity project with an allowed role, from the Studio's address, and nobody else. They check with Sanity on every request (remembered for a minute), never cache an answer, and never pass Stripe's error text on to the browser.
+- The routes behind the Orders tab answer a signed-in member of the Sanity project with an allowed role, from the Studio's address, and nobody else. They check with Sanity on every request (remembered for a minute), never cache an answer, and never pass Stripe's error text on to the browser. An API token of the project is refused unless `allowApiTokens` is set.
+- Your site receives each editor's Sanity sign-in with those requests. The plugin shows it to Sanity and neither keeps nor logs it; see that your host's request logs don't record the `Authorization` header. The Studio's `api` option takes `https` only, or `http` on localhost, so it never travels unencrypted.
+- The routes don't limit how often they are called. Use your host's rate limiting: every request with a sign-in the site hasn't seen in the last minute costs one question to Sanity. A member taken out of the project can still read orders for up to that minute.
 
 ## Developing
 

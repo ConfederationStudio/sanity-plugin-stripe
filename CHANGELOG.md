@@ -6,10 +6,10 @@ Until 1.0, a minor version may change the API. Each change that needs work on a 
 
 An Orders tab in the Studio. Nothing has to change on a site that doesn't want it.
 
-- **`studioRoutes()`** in `sanity-plugin-stripe/server` answers the Studio: `…/orders` lists the shop's completed checkouts and its subscriptions' renewals, newest first, and `…/orders/:id` gives one in full. Orders are read from Stripe at that moment for a signed-in member of the Sanity project with an allowed role (administrators and editors by default), from the Studio's address only. Nothing is written to Sanity.
-- **`api`** on `stripeCommerce()` tells the Studio where those routes are, and adds the Orders tab: who bought, when, where it goes, what to pack, the address to copy, what was paid back, and a link to the payment in Stripe. Orders that aren't paid yet are marked.
+- **`studioRoutes()`** in `sanity-plugin-stripe/server` answers the Studio: `…/orders` lists the shop's completed checkouts and its subscriptions' renewals, newest first, and `…/orders/:id` gives one in full. Orders are read from Stripe at that moment for a signed-in member of the Sanity project with an allowed role (administrators and editors by default), from the Studio's address only. An API token is refused unless `allowApiTokens` is set. Nothing is written to Sanity.
+- **`api`** on `stripeCommerce()` tells the Studio where those routes are (https, or http on localhost), and adds the Orders tab: who bought, when, where it goes, what to pack, the address to copy, what was paid back, and a link to the payment in Stripe. Orders that aren't paid yet are marked.
 
-Tried on 12 November 2026 in the Stripe sandbox, through the test shop's route: the list and three orders in full (one-off, a new subscription, an unpaid bank debit); no answer without a sign-in, for a Viewer's token, or for another website. In the signed-in test Studio the tab listed the same orders, opened an unpaid one with its warning and a subscription with its lines, and asked again on Refresh. Not tried against Stripe: a renewal in the list (the unit tests cover it).
+Tried on 12 November 2026 in the Stripe sandbox, through the test shop's route: the list and three orders in full (one-off, a new subscription, an unpaid bank debit); no answer without a sign-in, for a Viewer's token, or for another website. In the signed-in test Studio the tab listed the same orders, opened an unpaid one with its warning and a subscription with its lines, and asked again on Refresh. Those checks used the test project's API token, before such tokens were refused by default. Not tried: a person's own sign-in, and against Stripe a renewal in the list (the unit tests cover it).
 
 ## 0.2.0 (2026-11-11)
 

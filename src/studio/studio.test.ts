@@ -44,8 +44,19 @@ describe('resolveConfig', () => {
     expect(api('https://www.example.com/api/shop/')).toBe('https://www.example.com/api/shop')
     expect(api(' /api/shop ')).toBe('/api/shop')
     expect(api('http://localhost:3000/api/shop')).toBe('http://localhost:3000/api/shop')
-    for (const wrong of ['', 'www.example.com/api/shop', 'api/shop', '//example.com/api', '/'])
-      expect(() => api(wrong)).toThrow('api must be an address or a path')
+    expect(api('http://127.0.0.1:3000/api/shop')).toBe('http://127.0.0.1:3000/api/shop')
+    // The editor's sign-in travels to this address: never unencrypted over a network.
+    for (const wrong of [
+      '',
+      'www.example.com/api/shop',
+      'api/shop',
+      '//example.com/api',
+      '/',
+      'http://www.example.com/api/shop',
+      'http://localhost.example.com/api/shop',
+      'http://localhost@example.com/api/shop',
+    ])
+      expect(() => api(wrong)).toThrow('api must be an https address or a path')
   })
 
   it('labels prices with the shop’s word for tax', () => {

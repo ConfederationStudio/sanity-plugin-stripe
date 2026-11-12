@@ -147,6 +147,7 @@ describe('routeClient', () => {
     expect(failureText(new RouteError('unreachable'), API)).toContain(API)
     expect(failureText(new RouteError('forbidden-role'), API)).toContain('role')
     expect(failureText(new RouteError('no-token'), API)).toContain('sign in again')
+    expect(failureText(new RouteError('api-token'), API)).toContain('your own account')
     expect(failureText(new Error('anything else'), API)).toBe(
       'Stripe didn’t answer the site. Try again.',
     )

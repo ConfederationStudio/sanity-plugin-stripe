@@ -27,6 +27,8 @@ export interface SanityEditor {
   id: string
   /** The editor's role names in the project. Empty for someone who isn't a member. */
   roles: string[]
+  /** True for an API token made in the project's settings: a program, not a person signed in. */
+  apiToken: boolean
 }
 
 const editors = new Map<string, {editor: SanityEditor | null; expires: number}>()
@@ -57,7 +59,7 @@ export async function sanityEditor(
       .filter((name): name is string => typeof name === 'string' && name !== '')
     if (roles.length === 0 && typeof user.role === 'string' && user.role !== '')
       roles.push(user.role)
-    editor = {id: user.id, roles}
+    editor = {id: user.id, roles, apiToken: user.provider === 'sanity-token'}
   }
 
   if (editors.size >= MAX_CACHED) editors.clear()

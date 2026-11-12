@@ -79,6 +79,7 @@ export type StudioRouteErrorCode =
   | 'not-member'
   | 'forbidden-origin'
   | 'forbidden-role'
+  | 'api-token'
   | 'no-stripe'
   | 'stripe-failed'
   | 'sanity-failed'

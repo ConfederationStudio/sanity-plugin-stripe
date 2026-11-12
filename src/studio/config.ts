@@ -40,7 +40,7 @@ export interface StripeCommerceConfig {
     shippingRegions?: readonly ShippingRegionInput[]
   }
   /**
-   * Where the site answers the Studio, such as `https://www.example.com/api/shop`: the address
+   * Where the site answers the Studio, such as `https://www.example.com/api/shop`: the address (https, or http on localhost)
    * `studioRoutes` is mounted on. With it the Studio gets an Orders tab, read from Stripe through
    * the site. A Studio that runs on the site itself can give the path alone: `/api/shop`.
    */
@@ -62,9 +62,11 @@ export interface ResolvedConfig {
 function resolveApi(api: string | undefined): string | null {
   if (api === undefined) return null
   const address = typeof api === 'string' ? api.trim().replace(/\/+$/, '') : ''
-  if (!/^(?:https?:\/\/[^/\s]+|\/[^/\s])\S*$/.test(address))
+  // The Studio shows the site the editor's sign-in: over http that is for a site on this machine.
+  const local = /^http:\/\/(?:localhost|127\.0\.0\.1|\[::1\]|[\w.-]+\.localhost)(?::\d+)?(?:\/|$)/
+  if (!/^(?:https:\/\/[^/\s]+|\/[^/\s])\S*$/.test(address) && !local.test(address))
     throw new TypeError(
-      `sanity-plugin-stripe: api must be an address or a path, such as stripeCommerce({api: 'https://www.example.com/api/shop'})`,
+      `sanity-plugin-stripe: api must be an https address or a path, such as stripeCommerce({api: 'https://www.example.com/api/shop'})`,
     )
   return address
 }

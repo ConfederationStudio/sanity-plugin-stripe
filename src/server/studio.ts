@@ -39,6 +39,11 @@ export interface StudioRoutesOptions {
    * the default leaves viewers out: `['administrator', 'editor']`.
    */
   roles?: readonly string[]
+  /**
+   * Whether an API token of the project is answered like a person signed in to the Studio.
+   * Default false: orders are for people, and a leaked token with editor rights gets none.
+   */
+  allowApiTokens?: boolean
   /** For tests. */
   fetch?: typeof fetch
   log?: Log
@@ -54,6 +59,7 @@ const STATUS: Record<StudioRouteErrorCode, number> = {
   'not-member': 403,
   'forbidden-origin': 403,
   'forbidden-role': 403,
+  'api-token': 403,
   'no-stripe': 503,
   'stripe-failed': 502,
   'sanity-failed': 502,
@@ -165,7 +171,8 @@ async function inBatches<T, R>(items: T[], size: number, run: (item: T) => Promi
  * - `GET …/orders/:id`: one of them in full: what to pack and where to send it.
  *
  * Every request must carry the editor's Sanity sign-in, which the Studio sends by itself. The
- * route asks Sanity whose it is and answers members with one of `roles` only.
+ * route asks Sanity whose it is and answers members with one of `roles` only, and no API token
+ * unless `allowApiTokens` says so.
  */
 export function studioRoutes(options: StudioRoutesOptions): StudioRoutes {
   if (!isProjectId(options.projectId))
@@ -339,6 +346,7 @@ export function studioRoutes(options: StudioRoutesOptions): StudioRoutes {
       if (!editor) return fail('signed-out')
       if (editor.roles.length === 0) return fail('not-member')
       if (!editor.roles.some((role) => roles.has(role))) return fail('forbidden-role')
+      if (editor.apiToken && !options.allowApiTokens) return fail('api-token')
 
       const {stripe} = options
       if (!stripe) {

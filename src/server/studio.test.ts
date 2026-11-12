@@ -106,6 +106,7 @@ function sanity() {
     'editor-token': {id: 'u1', roles: [{name: 'editor'}]},
     'viewer-token': {id: 'u2', roles: [{name: 'viewer'}]},
     'stranger-token': {id: 'u3', roles: []},
+    'api-token': {id: 'p-1', provider: 'sanity-token', roles: [{name: 'editor'}]},
   }
   const fetchFn: typeof fetch = async (input, init) => {
     asked.push(input instanceof Request ? input.url : input.toString())
@@ -211,6 +212,15 @@ describe('studioRoutes: who may ask', () => {
     expect(calls).toHaveLength(before)
 
     const allowed = await routes(stripe, {roles: ['viewer']}).get('/orders', 'viewer-token')
+    expect(allowed.status).toBe(200)
+  })
+
+  it('answers people, not an API token with the same rights, unless the site says so', async () => {
+    const refused = await routes(stripe).get('/orders', 'api-token')
+    expect(refused.status).toBe(403)
+    expect(await refused.json()).toEqual({error: 'api-token'})
+
+    const allowed = await routes(stripe, {allowApiTokens: true}).get('/orders', 'api-token')
     expect(allowed.status).toBe(200)
   })
 
