@@ -7,6 +7,7 @@ Sell from a Sanity site with Stripe Checkout, without a shop platform in between
 - **In the Studio.** A `stripeCommerce` field for any document type: on sale or sold out, price, tax class, an optional subscription, variants that each sell out on their own, and optional stock counts. A Shop settings document holds the shipping regions with one flat rate each, free from an amount if you like, and whether stock sells out by itself at 0.
 - **In the browser.** A cart in localStorage that holds product references and quantities, never prices, with hooks for the buy button and the checkout. The markup is yours.
 - **On the server.** A checkout route that reads prices, stock and shipping fresh from Sanity and creates the Checkout Session, a webhook route that lowers stock and calls your `onOrder`, each once per payment however often Stripe delivers the event, and the same for each renewal of a [subscription](#subscriptions). A third route sends subscribers to Stripe's customer portal.
+- **Orders in the Studio.** An Orders tab lists the shop's orders and renewals, with what to pack and where to send it. It reads them from Stripe through your site each time it is opened: nothing is copied into Sanity. See [Orders in the Studio](#orders-in-the-studio).
 - **Made for a public dataset.** Most Sanity datasets can be read by anyone. Buyers, addresses and orders are never written to Sanity; stock counts are kept where only a token can read them; keys stay in your site's environment. See [On a public dataset](#on-a-public-dataset).
 
 ## How it fits together
@@ -156,7 +157,7 @@ Use a [sandbox](https://docs.stripe.com/sandboxes) while building, and a restric
 | Invoices          | Write | Reading a renewal, marking it handled. Only with subscriptions. |
 | Customer portal   | Read  | `portalRoute`. Only if you use it.                              |
 
-Whether it also works without Products and Prices was not tried. A missing permission shows in the route's log, in Stripe's own words.
+The Orders tab needed nothing more: the same key listed the checkouts and invoices and read what was paid back. Whether it also works without Products and Prices was not tried. A missing permission shows in the route's log, in Stripe's own words.
 
 Locally, forward events to the site and copy the `whsec_…` secret it prints into `STRIPE_WEBHOOK_SECRET`:
 
@@ -262,6 +263,38 @@ export const GET = portalRoute({stripe})
 
 It sends the visitor to Stripe's customer portal, where a subscriber changes their card or address, pauses or cancels, and finds their invoices. There are no accounts to build: they type their email on Stripe's page and Stripe emails them a link in. Switch the portal's login link on once, in the Stripe Dashboard under Settings, Billing, Customer portal, and choose there what subscribers may change. Until then the route answers 503 and its log says what to do. A portal set up through Stripe's API with its login page enabled works as well.
 
+## Orders in the Studio
+
+Give the site one more route and tell the plugin where it is, and the Studio gets an Orders tab:
+
+```ts
+// app/api/shop/[...path]/route.ts
+import {studioRoutes} from 'sanity-plugin-stripe/server'
+
+export const {GET, OPTIONS} = studioRoutes({
+  stripe,
+  integrationIdentifier: 'myshop_qhzvmkpt', // the checkout route's
+  projectId: 'your-project-id',
+  studioOrigins: ['https://myshop.sanity.studio'],
+})
+```
+
+```ts
+// sanity.config.ts
+stripeCommerce({currency: 'eur', api: 'https://www.example.com/api/shop'})
+```
+
+The tab lists this shop's completed checkouts and its subscriptions' renewals, newest first. Opening one shows the lines, the delivery charge, the address to send it to with a button to copy it, the buyer's email and phone, what was paid back, and a link to the payment in Stripe. An order whose payment hasn't arrived, such as a bank debit on its way, is marked "Not paid".
+
+How it stays private:
+
+- **Nothing is saved.** The Studio asks your site, your site asks Stripe, and the answer is shown. No order is written to the dataset and none is cached.
+- **The Studio holds no Stripe key.** It sends the editor's own Sanity sign-in to your route. The route asks Sanity whose it is, and answers only a member of the project whose role is in `roles`: administrators and editors unless you say otherwise. Viewers get nothing.
+- **Other websites get nothing.** The route answers the addresses in `studioOrigins` and the site's own. A Studio that lives on the site, at `/studio`, needs no entry and can pass `api: '/api/shop'`.
+- **Only this shop's orders.** Payments made another way on the same Stripe account, a Payment Link or another site, are left out.
+
+It reads, and that is all: refunds, and anything else that changes an order, are made in Stripe. The Studio shows your site the sign-in token Sanity gave it. A Studio signed in through Sanity's cookie alone has none, and the tab then says to sign in again.
+
 ## Free delivery and promotion codes
 
 Each shipping region can have a **Free from** amount: an order whose goods add up to it or more is delivered free there. The checkout works it out on the server. For the cart page, `shippingQuote(region, subtotal)` gives what will be charged and how much is missing, for "€4.01 more for free delivery".
@@ -272,15 +305,15 @@ Each shipping region can have a **Free from** amount: an order whose goods add u
 
 Sanity serves a public dataset to anyone, without a token, with one fixed exception: a document whose `_id` contains a dot (a draft, for one) is only served to signed-in project members and to API tokens. That is the only line Sanity draws below its Enterprise plan, so the plugin puts each thing on the right side of it, or outside Sanity altogether.
 
-| What                                                                                         | Where it lives                                                      | Who can read it                                                   |
-| -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- | ----------------------------------------------------------------- |
-| Prices, on sale or sold out, variants, the subscription a product offers                     | Your product documents                                              | Anyone. The shop shows them.                                      |
-| Shipping regions, rates and "free from" amounts, "sell out at 0", delivery for subscriptions | The Shop settings document, id `stripeShopSettings`                 | Anyone. The cart shows them.                                      |
-| Stock counts                                                                                 | `stripe.stock.<product id>`                                         | Project members and tokens.                                       |
-| What each payment did to stock                                                               | `stripe.stockChange.<session or invoice id>`, deleted after 30 days | Project members and tokens. It holds product ids and counts only. |
-| Buyers, addresses, orders, subscriptions, payments                                           | Stripe                                                              | Whoever has the Stripe account. Never written to Sanity.          |
-| The address order emails go to                                                               | Your site's environment                                             | Your server.                                                      |
-| The Stripe key, the webhook secret, the Sanity token                                         | Your site's environment                                             | Your server. Never in Sanity, never in the browser.               |
+| What                                                                                         | Where it lives                                                      | Who can read it                                                                                                                             |
+| -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| Prices, on sale or sold out, variants, the subscription a product offers                     | Your product documents                                              | Anyone. The shop shows them.                                                                                                                |
+| Shipping regions, rates and "free from" amounts, "sell out at 0", delivery for subscriptions | The Shop settings document, id `stripeShopSettings`                 | Anyone. The cart shows them.                                                                                                                |
+| Stock counts                                                                                 | `stripe.stock.<product id>`                                         | Project members and tokens.                                                                                                                 |
+| What each payment did to stock                                                               | `stripe.stockChange.<session or invoice id>`, deleted after 30 days | Project members and tokens. It holds product ids and counts only.                                                                           |
+| Buyers, addresses, orders, subscriptions, payments                                           | Stripe                                                              | Whoever has the Stripe account, and through your site the editors the [Orders tab](#orders-in-the-studio) lets in. Never written to Sanity. |
+| The address order emails go to                                                               | Your site's environment                                             | Your server.                                                                                                                                |
+| The Stripe key, the webhook secret, the Sanity token                                         | Your site's environment                                             | Your server. Never in Sanity, never in the browser.                                                                                         |
 
 Why not keep orders in private documents too: a dot hides a document from the public, not from the rest of the project. Every member, including free Viewer seats, every API token that can read (the one many sites use for previews, for one), and every dataset export gets them, and Sanity keeps deleted content in history for 3 to 365 days depending on the plan. That is fine for stock. It is not fine for people's names and addresses.
 
@@ -341,6 +374,7 @@ A product without variants has `stockCount` at the top. No count means it isn't 
 | `tax.included`         | Whether entered prices include tax. It only changes the labels. Default true.                                            |
 | `tax.classes`          | `{title, value}` choices for a product's tax class. Without any, the field is left out.                                  |
 | `shop.shippingRegions` | Starting regions: `{title, countries, rate}` or `{title, everywhereElse: true, rate}`, each with an optional `freeFrom`. |
+| `api`                  | Where `studioRoutes` is mounted on the site: an address, or a path when the Studio is on the site. Adds the Orders tab.  |
 
 ### `checkoutRoute()`
 
@@ -389,11 +423,23 @@ If stock can't be lowered (a token that may only read), `onOrder` still runs, wi
 | `stripe`  | From `createStripe`. Without one the route answers 503. Required. |
 | `message` | What a visitor reads when the portal can't be opened.             |
 
+### `studioRoutes()`
+
+Returns `{GET, OPTIONS}`. Mount it on a catch-all path: it answers `…/orders` and `…/orders/:id`.
+
+| Option                  |                                                                                                           |
+| ----------------------- | --------------------------------------------------------------------------------------------------------- |
+| `stripe`                | From `createStripe`. Without one the routes answer 503. Required.                                         |
+| `integrationIdentifier` | The checkout route's. Only orders that carry it are shown. Required.                                      |
+| `projectId`             | The Sanity project the Studio belongs to. It is asked who each caller is. Required.                       |
+| `studioOrigins`         | Where the Studio runs, such as `['https://myshop.sanity.studio']`. The site's own address needs no entry. |
+| `roles`                 | Project roles that may read orders, by name. Default `['administrator', 'editor']`.                       |
+
 ## What it doesn't do
 
 - **Tax compliance.** Prices are what editors enter. A tax class can attach a Stripe tax rate you created, so the receipt shows the tax, and that is all. It does not use Stripe Tax and does not work out the VAT of the buyer's country for cross-border sales. Ask your accountant what your shop needs.
 - **Hold stock during checkout.** Stock is checked when Checkout starts and lowered when the payment lands. Two buyers can both pay for the last copy; the order email then says so. `expiresInMinutes` narrows the window.
-- **Show orders in the Studio.** Orders are in the Stripe Dashboard and in the email your `onOrder` sends. An Orders tab that reads them live from Stripe is planned.
+- **Refund, edit or mark an order as sent.** The [Orders tab](#orders-in-the-studio) reads. What changes an order is done in the Stripe Dashboard, which each order links to.
 - **Send email.** `orderEmail()` writes the order email; sending it is your `onOrder`, with your email service.
 - **Shipping by weight, discount logic of its own.** A flat rate per region, free from an amount if you like. Discounts are Stripe's promotion codes.
 - **Trials, or switching a subscription to another product.** A subscriber can pause, cancel and change their card and address in Stripe's portal. Their subscription keeps the product and price it started with.
@@ -405,6 +451,7 @@ If stock can't be lowered (a token that may only read), `onOrder` still runs, wi
 - Keys come from your environment and are passed in. Use a restricted key, and a separate one for each environment.
 - Names inside the plugin's GROQ (document types, the field name) are checked when the routes are made. Ids travel as query parameters.
 - The order email escapes everything a buyer typed.
+- The routes behind the Orders tab answer a signed-in member of the Sanity project with an allowed role, from the Studio's address, and nobody else. They check with Sanity on every request (remembered for a minute), never cache an answer, and never pass Stripe's error text on to the browser.
 
 ## Developing
 

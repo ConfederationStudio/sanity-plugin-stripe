@@ -2,6 +2,15 @@
 
 Until 1.0, a minor version may change the API. Each change that needs work on a site or Studio says what to do.
 
+## Unreleased
+
+An Orders tab in the Studio. Nothing has to change on a site that doesn't want it.
+
+- **`studioRoutes()`** in `sanity-plugin-stripe/server` answers the Studio: `…/orders` lists the shop's completed checkouts and its subscriptions' renewals, newest first, and `…/orders/:id` gives one in full. Orders are read from Stripe at that moment for a signed-in member of the Sanity project with an allowed role (administrators and editors by default), from the Studio's address only. Nothing is written to Sanity.
+- **`api`** on `stripeCommerce()` tells the Studio where those routes are, and adds the Orders tab: who bought, when, where it goes, what to pack, the address to copy, what was paid back, and a link to the payment in Stripe. Orders that aren't paid yet are marked.
+
+Tried on 12 November 2026 in the Stripe sandbox, through the test shop's route: the list and three orders in full (one-off, a new subscription, an unpaid bank debit); no answer without a sign-in, for a Viewer's token, or for another website. Not tried against Stripe: a renewal in the list (the unit tests cover it), and the tab inside a signed-in Studio (its layout was looked at with sample orders).
+
 ## 0.2.0 (2026-11-11)
 
 Subscriptions, the customer portal, free delivery from an amount and promotion codes. Nothing has to change on a site that sells one-off only.

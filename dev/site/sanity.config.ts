@@ -24,6 +24,8 @@ export default defineConfig({
     }),
     stripeCommerce({
       currency: CURRENCY,
+      // The Orders tab asks this site, which asks Stripe: app/api/shop/[...path]/route.ts.
+      api: '/api/shop',
       tax: {
         label: 'VAT',
         classes: [
