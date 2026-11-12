@@ -58,6 +58,10 @@ const metadataOf = (product: string | Stripe.Product | Stripe.DeletedProduct | u
 const idOf = (value: string | {id: string} | null | undefined) =>
   typeof value === 'string' ? value : (value?.id ?? null)
 
+/** The subscription an invoice bills, or null for an invoice that isn't a subscription's. */
+export const subscriptionOf = (invoice: Stripe.Invoice): string | null =>
+  idOf(invoice.parent?.subscription_details?.subscription)
+
 /** Reads a completed session and its line items into an order. */
 export async function getOrder(stripe: Stripe, session: Stripe.Checkout.Session): Promise<Order> {
   const lineItems = await stripe.checkout.sessions.listLineItems(session.id, {

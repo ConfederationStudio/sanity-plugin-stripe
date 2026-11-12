@@ -1,6 +1,6 @@
 /**
- * `sanity-plugin-stripe/server`: the site's checkout route, Stripe webhook and customer portal
- * route. Web `Request` and `Response` only, so the handlers fit Next.js, Remix, Astro, SvelteKit
+ * `sanity-plugin-stripe/server`: the site's checkout route, Stripe webhook, customer portal
+ * route and the routes the Studio's Orders tab calls. Web `Request` and `Response` only, so the handlers fit Next.js, Remix, Astro, SvelteKit
  * or Hono. It imports neither Sanity nor React.
  */
 export {dashboardUrl, orderEmail, type OrderEmail, type OrderEmailOptions} from './email'
@@ -21,6 +21,7 @@ export {
 export type {SanityReader, SanityTransaction, SanityWriter} from './sanity'
 export {readStock, type StockChange} from './stock'
 export {createStripe, STRIPE_API_VERSION} from './stripe'
+export {studioRoutes, type StudioRoutes, type StudioRoutesOptions} from './studio'
 
 // For the site's server components and queries.
 export {
@@ -35,6 +36,16 @@ export {
   type Interval,
 } from '../core/cart'
 export {EU_COUNTRIES} from '../core/countries'
+export type {
+  OrderAddress,
+  OrderDetail,
+  OrderDetailItem,
+  OrderReply,
+  OrdersReply,
+  OrderStatus,
+  OrderSummary,
+  StudioRouteErrorCode,
+} from '../core/orders'
 export {formatMoney, formatPrice} from '../core/money'
 export {
   cartProductProjection,

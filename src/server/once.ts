@@ -40,3 +40,11 @@ export async function oncePerInvoice(
   await stripe.invoices.update(invoice.id, stamp(step))
   return 'done'
 }
+
+/** When a step finished for a session or an invoice, as ISO 8601, or null when it hasn't. */
+export function finishedAt(
+  metadata: Stripe.Metadata | null | undefined,
+  step: string,
+): string | null {
+  return metadata?.[keyOf(step)] || null
+}

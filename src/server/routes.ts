@@ -18,7 +18,7 @@ import type {ProductStock} from '../core/stock'
 import {buildCheckoutSession} from './checkout'
 import {classifyEvent, verifyEvent} from './events'
 import {once, oncePerInvoice} from './once'
-import {getOrder, getRenewal, type Order} from './order'
+import {getOrder, getRenewal, subscriptionOf, type Order} from './order'
 import type {SanityReader, SanityWriter} from './sanity'
 import {decrementStock, readStock, type StockChange} from './stock'
 
@@ -231,11 +231,6 @@ function absoluteUrl(url: string, origin: string): string {
 }
 
 // Webhook
-
-const subscriptionOf = (invoice: Stripe.Invoice): string | null => {
-  const subscription = invoice.parent?.subscription_details?.subscription
-  return typeof subscription === 'string' ? subscription : (subscription?.id ?? null)
-}
 
 export interface OrderContext {
   /** The shop settings as published. Null before they are published. */
