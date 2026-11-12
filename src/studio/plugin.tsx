@@ -1,7 +1,9 @@
+import {BasketIcon} from '@sanity/icons/Basket'
 import {definePlugin} from 'sanity'
 
 import {SHOP_SETTINGS_TYPE} from '../core/ids'
 import {resolveConfig, type StripeCommerceConfig} from './config'
+import {OrdersTool} from './OrdersTool'
 import {createCommerceType, createSubscriptionType, createVariantType} from './schema/commerce'
 import {createShippingRegionType, createShopSettingsType} from './schema/settings'
 
@@ -27,7 +29,8 @@ export function settingsActions<T extends {action?: string}>(
  * Selling with Stripe Checkout from the Studio: the `stripeCommerce` field (price, tax class,
  * on sale or sold out, an optional subscription, variants, and stock counts kept out of the
  * public dataset) and the shop settings document (shipping regions, selling out at 0, delivery
- * for subscriptions).
+ * for subscriptions). With `api`, an Orders tab too: the shop's orders, read from Stripe through
+ * the site and never saved in Sanity.
  *
  * ```ts
  * plugins: [structureTool({structure}), stripeCommerce({currency: 'eur'})]
@@ -38,8 +41,19 @@ export function settingsActions<T extends {action?: string}>(
  */
 export const stripeCommerce = definePlugin<StripeCommerceConfig>((options) => {
   const config = resolveConfig(options)
+  const {api} = config
   return {
     name: 'sanity-plugin-stripe',
+    tools: api
+      ? [
+          {
+            name: 'orders',
+            title: 'Orders',
+            icon: BasketIcon,
+            component: () => <OrdersTool api={api} />,
+          },
+        ]
+      : [],
     schema: {
       types: [
         createCommerceType(config),

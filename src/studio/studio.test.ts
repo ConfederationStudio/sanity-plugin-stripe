@@ -4,7 +4,7 @@ import {fakeDataset} from '../__fixtures__/sanity'
 import {EU_COUNTRIES} from '../core/countries'
 import {COMMERCE_TYPE, SHOP_SETTINGS_TYPE, stockId} from '../core/ids'
 import {moneyTitle, resolveConfig} from './config'
-import {settingsActions, withoutSettingsTemplate} from './plugin'
+import {settingsActions, stripeCommerce, withoutSettingsTemplate} from './plugin'
 import {createCommerceType, createSubscriptionType, createVariantType} from './schema/commerce'
 import {
   countCountries,
@@ -32,10 +32,20 @@ describe('resolveConfig', () => {
       priceDecimals: 2,
       tax: {label: 'tax', included: true, classes: []},
       shop: {shippingRegions: []},
+      api: null,
     })
     expect(() => resolveConfig({currency: 'euro'})).toThrow('three-letter code')
     // @ts-expect-error A Studio configured from JavaScript can leave it out.
     expect(() => resolveConfig()).toThrow('three-letter code')
+  })
+
+  it('takes the site’s address for the Orders tab, or a path on the Studio’s own site', () => {
+    const api = (value: string) => resolveConfig({currency: 'eur', api: value}).api
+    expect(api('https://www.example.com/api/shop/')).toBe('https://www.example.com/api/shop')
+    expect(api(' /api/shop ')).toBe('/api/shop')
+    expect(api('http://localhost:3000/api/shop')).toBe('http://localhost:3000/api/shop')
+    for (const wrong of ['', 'www.example.com/api/shop', 'api/shop', '//example.com/api', '/'])
+      expect(() => api(wrong)).toThrow('api must be an address or a path')
   })
 
   it('labels prices with the shop’s word for tax', () => {
@@ -326,5 +336,13 @@ describe('delivery in the shop settings', () => {
         ],
       },
     })
+  })
+})
+
+describe('the Orders tab', () => {
+  it('is there once the plugin knows where the site answers, and not before', () => {
+    expect(stripeCommerce({currency: 'eur'}).tools).toEqual([])
+    const tools = stripeCommerce({currency: 'eur', api: '/api/shop'}).tools
+    expect(tools).toEqual([expect.objectContaining({name: 'orders', title: 'Orders'})])
   })
 })

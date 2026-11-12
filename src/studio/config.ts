@@ -39,6 +39,12 @@ export interface StripeCommerceConfig {
   shop?: {
     shippingRegions?: readonly ShippingRegionInput[]
   }
+  /**
+   * Where the site answers the Studio, such as `https://www.example.com/api/shop`: the address
+   * `studioRoutes` is mounted on. With it the Studio gets an Orders tab, read from Stripe through
+   * the site. A Studio that runs on the site itself can give the path alone: `/api/shop`.
+   */
+  api?: string
 }
 
 export interface ResolvedConfig {
@@ -49,6 +55,18 @@ export interface ResolvedConfig {
   priceDecimals: 0 | 2
   tax: {label: string; included: boolean; classes: readonly TaxClass[]}
   shop: {shippingRegions: readonly ShippingRegionInput[]}
+  /** Without a slash at the end. Null when the site has no Studio routes. */
+  api: string | null
+}
+
+function resolveApi(api: string | undefined): string | null {
+  if (api === undefined) return null
+  const address = typeof api === 'string' ? api.trim().replace(/\/+$/, '') : ''
+  if (!/^(?:https?:\/\/[^/\s]+|\/[^/\s])\S*$/.test(address))
+    throw new TypeError(
+      `sanity-plugin-stripe: api must be an address or a path, such as stripeCommerce({api: 'https://www.example.com/api/shop'})`,
+    )
+  return address
 }
 
 export function resolveConfig(config: StripeCommerceConfig): ResolvedConfig {
@@ -67,6 +85,7 @@ export function resolveConfig(config: StripeCommerceConfig): ResolvedConfig {
       classes: config.tax?.classes ?? [],
     },
     shop: {shippingRegions: config.shop?.shippingRegions ?? []},
+    api: resolveApi(config.api),
   }
 }
 
